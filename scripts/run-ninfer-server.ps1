@@ -21,6 +21,11 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+if ($Stop) {
+    if ($OpenChat) { throw '-OpenChat cannot be combined with -Stop.' }
+    & (Join-Path $PSScriptRoot 'stop-ninfer.ps1')
+    return
+}
 $explicitNames = @{}
 foreach ($name in $PSBoundParameters.Keys) { $explicitNames[$name] = $true }
 
@@ -296,42 +301,6 @@ function Get-ModelsAuthorizationError {
         return ('GET /v1/models rejected the configured API key with HTTP {0}. Check the key in .local\windows-server.psd1 or pass -ApiKey.' -f $StatusCode)
     }
     return ('GET /v1/models returned HTTP {0}, and no API key is configured. Set ApiKey in .local\windows-server.psd1 or pass -ApiKey.' -f $StatusCode)
-}
-
-if ($Stop) {
-    if ($OpenChat) { throw '-OpenChat cannot be combined with -Stop.' }
-    $selectedAddresses = Get-SelectedListenAddresses $listenArgument
-    $listeners = Get-ListenersOnPort $Port
-    $matchingListeners = @($listeners | Where-Object {
-        $selectedAddresses -contains ([string]$_.LocalAddress).Trim([char[]]@('[', ']'))
-    })
-    $listenerIds = @($matchingListeners |
-        ForEach-Object { [int]$_.OwningProcess } |
-        Sort-Object -Unique)
-    if ($listenerIds.Count -eq 0) {
-        Write-Host ('No listener for {0}:{1} was found.' -f $ListenHost, $Port)
-        return
-    }
-    if ($listenerIds.Count -ne 1) {
-        throw ('Found multiple listener processes for {0}:{1}; no process was stopped.' -f $ListenHost, $Port)
-    }
-
-    $listenerId = $listenerIds[0]
-    try {
-        $listenerProcess = Get-Process -Id $listenerId -ErrorAction Stop
-        if (-not $listenerProcess.Path) { throw 'process path unavailable' }
-        $listenerPath = [System.IO.Path]::GetFullPath($listenerProcess.Path)
-    } catch {
-        throw "Cannot verify listener PID $listenerId executable path; no process was stopped."
-    }
-    if ($listenerPath -ine $serverExe) {
-        throw ('PID {0} on {1}:{2} is {3}, not {4}. No process was stopped.' -f
-            $listenerId, $ListenHost, $Port, $listenerPath, $serverExe)
-    }
-
-    Stop-Process -Id $listenerId -ErrorAction Stop
-    Write-Host ('Stopped NInfer server PID {0} on {1}:{2}.' -f $listenerId, $ListenHost, $Port)
-    return
 }
 
 # Avoid loading a second copy of the model when this port already serves the expected API.

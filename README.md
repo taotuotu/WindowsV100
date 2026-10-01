@@ -26,7 +26,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\download-model.ps1
 .\start-ninfer.bat
 ```
 
-`start-ninfer.bat` 是一键入口：启动模型，等待健康状态和模型列表就绪，再自动打开 **http://127.0.0.1:8110/**。首次初始化可能需要几分钟，默认等待上限10分钟。已运行的同一服务会被复用；本次新启动的服务由启动窗口持有，Ctrl+C 或关闭窗口停止它。启动失败会保留报错窗口；`stop-ninfer.bat` 可停止匹配的实例。页面聊天只保存在内存里，刷新会清空。
+`start-ninfer.bat` 是一键入口：启动模型，等待健康状态和模型列表就绪，再自动打开 **http://127.0.0.1:8110/**。首次初始化可能需要几分钟，默认等待上限10分钟。已运行的同一服务会被复用；本次新启动的服务由启动窗口持有，Ctrl+C 或关闭窗口停止它。启动失败会保留报错窗口。`stop-ninfer.bat` 一键结束本仓库 `build*`、`bin`、`dist` 和 `.local` 下路径匹配的 NInfer server、text/CLI 与 perplexity 进程，包括尚未监听的初始化进程；`stop-ninfer.bat -List` 只列出候选而不停止。它只处理明确的 NInfer 可执行文件名和当前仓库路径内的程序。页面聊天只保存在内存里，刷新会清空。
 
 页面的“全局速度”每秒左右刷新，包含网页、ZCode 和其它平台的生成调用：服务总解码/预填充吞吐、运行/排队状态、累计解码和缓存命中、最近请求与速率趋势。实时吞吐是相邻服务快照之间的真实 token 增量/耗时，与单次回答的解码阶段平均速率分开显示；解码计数不含预填充产生的首 token。请求记录只有匿名计时与计数，服务重启后重置。
 
@@ -47,7 +47,7 @@ CUDA 13 已移除 Volta 编译支持。更详细的安装、配置和问题处�
 | Model | `qwen3.8-27b` |
 | API key | 默认不鉴权；客户端必填时可填 `local` |
 | 上下文容量 | 8192，输入与输出合计 |
-| 活动请求 | 1，额外请求排队 |
+| 活动请求 | 1，同时发来的第二个生成请求返回 HTTP 429 |
 
 提高容量或指定设备：
 
@@ -56,6 +56,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-ninfer-server.
 ```
 
 153600 是本机 32GB Volta 上成功分配的配置，需要充足空闲显存；它不代表 15 万 token 实际输入的性能或质量已经验证。可把个人设置写入 `.local/windows-server.psd1`，显式命令参数优先；该目录不会进入源码或发行包。
+
+### 会话缓存与关闭服务
+
+Windows 服务只保留当前会话的缓存：同一会话连续请求继续复用，切换会话前清除旧会话的全部私有/共享 checkpoint。网页每个新对话发送独立 `X-NInfer-Session` 标识；外部客户端可发送同一请求头区分会话。不发送时，Chat/Anthropic 按首个 user turn 的内容摘要识别，Responses 沿用 `previous_response_id` 链的会话标识。模型仍逐项验证真实 token 前缀，标识只决定缓存归属。
+
+网页的完整输入计数表示本轮历史总量；“缓存命中”和“需 Prefill”显示哪些部分已经计算、哪些需要重算。首次请求、切换会话、修改早期内容或手动清理后仍要重建。Windows 默认有8份 Host State checkpoint 槽，32GB Volta配置每份约146.82MiB固定状态，额外占用系统内存。
+
+网页设置里的“清理全部缓存”在服务空闲时执行，并保留页面历史；“关闭推理服务”取消当前生成并关闭当前服务。要关闭这个安装目录的全部 NInfer 程序，双击 `stop-ninfer.bat`，包含尚未启动监听的初始化进程。
 
 ## 性能与继续优化
 

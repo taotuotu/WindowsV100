@@ -106,6 +106,14 @@ Engine 是请求控制平面，拥有：
 
 Engine 理解请求、预算、finish reason 和可发布输出，不解释 transformer layer、KV plane 或 allocator。
 
+`Engine::clear_context_cache()` 是 Generation Engine 的 idle-only 操作：调用时必须没有排队、准备提交或
+尚未终结的请求，也不能有 context transaction。忙时立即抛出 `std::logic_error`，不会等待或取消请求。
+通过检查后，Engine worker 依次释放 ResourceManager 中的 inactive private/shared checkpoint 及对应的
+Program 资源，再清空 session/prefix 索引；active lane 不会被回滚。已经终结的 generation handle 即使仍由
+调用者持有，也不阻止清理。操作保留模型权重和累计 RuntimeStats。
+若 Program 拒绝 release capability，Engine 会在已开始物理释放时执行统一 failure cleanup 并标记不可用，
+不会让逻辑目录与剩余物理 cache 半清状态继续服务。
+
 ### 2.4 Program
 
 Program 是 exact target package 的唯一物理执行入口，拥有：
@@ -163,6 +171,8 @@ ResourceManager 维护：
 
 它把请求和缓存候选交给 Program 评估，并采用 Program 返回的完整物理结果。它不维护一份
 Device/Host bytes、page refcount 或 allocator free space 的镜像。
+显式清空缓存时，ResourceManager 先验证所有 lane 和 transaction 均空闲，再通过 Program 的 capability
+release 接口释放 private continuation 与 shared prefix；清空逻辑目录不会替代物理释放。
 
 ### 3.3 Program：只决定“物理上能否执行以及如何执行”
 

@@ -978,6 +978,10 @@ raw counters and seconds over rounded stderr rates.
 
 ## Execution behavior
 
+The Windows text server additionally enforces the [exclusive-session policy](windows-v100.md#当前会话独占缓存): one generation request for its complete preparation/response lifetime, with HTTP429 `inference_busy` for a competing request. A validated request changing the session identity clears all inactive private/shared Engine checkpoints before submission. `X-NInfer-Session` selects that identity; Chat/Anthropic without the header derive it from the initial user turn, while Responses retains its response-chain identity. These Windows rules override the general multi-request ingress behavior below. Read-only UI/model/token-count calls do not clear or claim a generation cache session.
+
+Windows localhost UI controls require the configured API key and `X-NInfer-Control: 1`: `POST /ui/cache/clear` clears inactive checkpoints only when idle (200; 409 when busy), and `POST /ui/shutdown` returns202 then cancels generation and closes the service. Runtime token totals stay cumulative across cache clearing. The UI snapshot adds `context_session` with `mode`, `busy`, `owner` (`web`/`api`/`none`), and `switch_count`; no prompt, session key or output text is published.
+
 The server owns one resident Engine with a startup-fixed capacity of `1..8` active generation
 requests. At each decode boundary, every decode-ready request is compacted into one batch and
 processed by one model traversal and, when graphs are enabled, one exact-batch CUDA Graph replay. A

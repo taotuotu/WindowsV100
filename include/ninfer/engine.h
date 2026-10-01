@@ -109,6 +109,11 @@ public:
     [[nodiscard]] MediaCacheSummary media_cache_summary() const;
     [[nodiscard]] bool is_available() const;
 
+    // Releases all inactive private and shared context checkpoints. This is an idle-only
+    // Generation operation: it throws std::logic_error while requests or context transactions
+    // are active. It preserves model weights and cumulative runtime counters.
+    void clear_context_cache();
+
     void reset_memory_peaks() noexcept;
 
 private:

@@ -124,8 +124,10 @@ std::string serve_usage_text(const char* argv0) {
 #if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
            "       compatible-prefix reuse is enabled by default; hits require a matching prompt prefix "
            "and saved state\n"
-           "       text-only cache defaults: extra Device StateImages=1, Host StateImages=2, Host KV=0 MiB, "
+           "       exclusive-session cache defaults: extra Device StateImages=1, Host StateImages=8, Host KV=0 MiB, "
            "private continuations=2x concurrency, shared prefixes=max(concurrency,4), anchors=1\n"
+           "       Windows serves one generation request at a time; a concurrent request receives HTTP 429. "
+           "Switching session clears the previous session's checkpoints.\n"
            "       --no-prefix-reuse disables compatible-prefix caching\n"
 #else
            "       --no-prefix-reuse disables compatible-prefix caching (enabled by default)\n"
@@ -160,7 +162,7 @@ ServeOptions parse_serve_options(int argc, char** argv) {
 #if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
     options.device                                      = -1;
     options.context_cache.device_state_slots                = 1;
-    options.context_cache.host_state_slots                  = 2;
+    options.context_cache.host_state_slots                  = 8;
     options.context_cache.host_kv_capacity_bytes            = 0;
     options.context_cache.max_long_anchors_per_continuation = 1;
 #endif
@@ -415,6 +417,11 @@ ServeOptions parse_serve_options(int argc, char** argv) {
     if (options.max_concurrency == 0 || options.max_concurrency > kMaximumConcurrency) {
         throw std::invalid_argument("--max-concurrency must be in [1,8]");
     }
+#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+    if (options.max_concurrency != 1) {
+        throw std::invalid_argument("the Windows exclusive-session server requires --max-concurrency 1");
+    }
+#endif
     if (options.max_pending_requests == 0) {
         throw std::invalid_argument("--max-pending-requests must be positive");
     }

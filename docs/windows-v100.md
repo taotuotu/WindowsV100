@@ -38,7 +38,7 @@ identity: qwen3.8-27b / nvfp4, container v2
 
 双击 `start-ninfer.bat`，一次完成模型启动、就绪等待和打开浏览器。它先找源码构建的 Release 程序，再找程序包的 `bin/ninfer-windows-serve.exe`；等待 `/health` 和预期模型列表可用后才打开聊天页。首次初始化可能需要几分钟，默认等待上限600秒，可用 `-ReadyTimeoutSeconds` 调整。
 
-已经健康运行的同一程序直接复用；同一程序正在初始化时等待，不重新加载模型。其它程序占用端口会显示错误。新服务在当前启动窗口中运行，Ctrl+C 或关闭窗口停止本次启动的服务；复用已有服务时不取得其进程所有权。失败会暂停保留报错，浏览器关联失败则显示可复制的聊天地址。`stop-ninfer.bat` 只停止端口和程序路径均匹配的实例。
+已经健康运行的同一程序直接复用；同一程序正在初始化时等待，不重新加载模型。其它程序占用端口会显示错误。新服务在当前启动窗口中运行，Ctrl+C 或关闭窗口停止本次启动的服务；复用已有服务时不取得其进程所有权。失败会暂停保留报错，浏览器关联失败则显示可复制的聊天地址。`stop-ninfer.bat` 一键结束本仓库 `build*`、`bin`、`dist` 和 `.local` 下路径匹配的 NInfer server、text/CLI 与 perplexity 进程，也会识别尚未监听的初始化进程。`stop-ninfer.bat -List` 只列出候选 PID 与路径，不停止进程。
 
 脚本 `run-ninfer-server.ps1 -OpenChat` 启用上述一键模式；不带该开关时维持纯 API 服务入口。一键模式的模型、地址、端口与密钥应使用脚本的 `-Model/-ListenHost/-Port/-ApiKey` 参数，避免原生额外参数覆盖探测目标。额外的 `--model-id` 会被用于预期别名探测。
 
@@ -51,8 +51,8 @@ identity: qwen3.8-27b / nvfp4, container v2
 | 推测解码 | learned MTP3、optimized head |
 | Prefill chunk | 512 |
 | Listen / port | `127.0.0.1:8110` |
-| 前缀缓存 | 开启；额外 Device State 1、Host State 2、Host KV 0 |
-| 活动请求 | 1 |
+| 前缀缓存 | 开启；当前会话独占；额外 Device State 1、Host State 8、Host KV 0 |
+| 活动请求 | 1；第二个生成请求返回429/`inference_busy`，完成或停止后重试 |
 | 思考与采样 | 默认思考关闭、temperature 0、seed 123；请求可覆盖 |
 
 显式参数示例：
@@ -85,6 +85,18 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-ninfer-server.
 一键入口 `start-ninfer.bat` 会在就绪后打开 **http://127.0.0.1:8110/**。已有服务也可直接访问此地址。页面从 `GET /ui/model-info` 读取实际模型 ID、artifact basename、KV、MTP 档位、容量和设备；未知信息显示未获取。网页源代码构建时嵌入 EXE，运行不需要 CDN、npm 或额外静态文件。
 
 多轮聊天与 API key 仅在页面内存里；刷新清空。停止生成保留已经收到的文本。输出作为文本呈现。
+
+### 当前会话独占缓存
+
+Windows只接收一个生成请求，包括输入准备、生成和HTTP结果交付。其它生成请求收到429后重试；查看全局速度与模型信息不占这个名额。准备失败的请求不会切换缓存归属。服务在完整输入准备成功后、提交推理前比较会话标识：同会话保留缓存，新会话先通过Engine执行线程清除全部inactive private/shared checkpoint，再开始推理。
+
+网页每个页面/新对话带稳定的 `X-NInfer-Session: web-UUID`。其它平台支持自定义HTTP头时，为每条对话使用独立标识，并在后续请求保持相同值。标识限1–128个ASCII字母、数字、点、下划线、冒号或连字符。省略时，Chat/Anthropic使用首个user turn内容摘要；相同首句会归为同一缓存会话，需要精确区分时发送请求头。Responses继续使用其响应链已有会话标识；显式请求头优先。前缀身份始终由实际token/position校验，标识不替代内容匹配。
+
+网页仍按Chat协议发送自己的完整历史，并显示“输入 tokens / 缓存命中 / 需 Prefill”。完整输入总量不表示每次都重新计算所有token。Windows主动请求当前会话的滚动shared写入；是否能保留仍由资源可行性决定。首次、会话切换、早期历史/模板改变或清缓存之后需要重建；不能保证所有多轮都命中。建议单次最大输出先按实际需要设8192/16384，避免为数百token答案预留十几万token。
+
+“清理全部缓存”只在空闲时执行，保留网页历史与模型权重；下一轮重建缓存。“关闭推理服务”请求取消当前生成并退出本服务，模型显存在进程退出后释放。桌面/根目录 `stop-ninfer.bat` 会结束此安装目录的所有匹配NInfer进程，包含初始化阶段；`run-ninfer-server.ps1 -Stop`也转到这个入口，不依赖模型文件、配置或端口。
+
+控制接口为本机 `POST /ui/cache/clear` 与 `POST /ui/shutdown`，需 `X-NInfer-Control: 1`，配置了API key时仍需相同鉴权。清理成功返回200/`cleared`，有请求交付中返回409/`context_busy`；关闭返回202/`shutdown_requested`。关闭请求被接受不等于进程已经退出。控制接口不支持跨域浏览器控制；网页在同源地址调用。
 
 | 客户端设置 | 值 |
 |---|---|

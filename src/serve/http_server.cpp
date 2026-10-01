@@ -27,6 +27,20 @@
 namespace ninfer::serve {
 namespace {
 
+#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+void require_local_control(const httplib::Request& request) {
+    const bool local = request.remote_addr == "127.0.0.1" || request.remote_addr == "::1" ||
+                       request.remote_addr == "::ffff:127.0.0.1";
+    if (!local || request.get_header_value("X-NInfer-Control") != "1") {
+        ApiError error;
+        error.status = 403;
+        error.code = "local_control_required";
+        error.message = "this operation requires a local request with X-NInfer-Control: 1";
+        throw ApiException(std::move(error));
+    }
+}
+#endif
+
 void write_exception(httplib::Response& res, const std::exception& ex) {
     ApiError error;
     error.status  = 500;
@@ -324,12 +338,14 @@ void HttpServer::trim_ui_request_history_locked() {
 
 void HttpServer::record_request_start(const RequestLogContext& context) {
 #if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+    const std::string source = service_ ? service_->context_session_info().owner : "unknown";
     {
         std::lock_guard lock(ui_metrics_mutex_);
         ++ui_requests_started_;
         UiRecentRequest request;
         request.id             = context.id;
         request.protocol       = context.protocol;
+        request.source         = source;
         request.status         = "running";
         request.started_at_ms  = ui_uptime_ms();
         ui_recent_requests_.push_back(std::move(request));
@@ -363,6 +379,7 @@ void HttpServer::record_request_rejected(const RequestRejectionLogContext& conte
 void HttpServer::record_request_done(const RequestLogContext& context,
                                      const GenerationOutcome& outcome) {
 #if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+    const std::string source = service_ ? service_->context_session_info().owner : "unknown";
     const int prompt_tokens     = std::max(0, outcome.prompt_tokens);
     const int completion_tokens = std::max(0, outcome.completion_tokens);
     const std::uint64_t cached_tokens = std::min<std::uint64_t>(
@@ -394,6 +411,7 @@ void HttpServer::record_request_done(const RequestLogContext& context,
         UiRecentRequest terminal_request;
         terminal_request.id               = context.id;
         terminal_request.protocol         = context.protocol;
+        terminal_request.source           = source;
         terminal_request.status           = "completed";
         terminal_request.prompt_tokens    = prompt_tokens;
         terminal_request.completion_tokens = completion_tokens;
@@ -405,6 +423,7 @@ void HttpServer::record_request_done(const RequestLogContext& context,
         terminal_request.finished_at_ms  = finished_at_ms;
         if (request != ui_recent_requests_.end()) {
             terminal_request.started_at_ms = request->started_at_ms;
+            terminal_request.source = request->source;
             *request = std::move(terminal_request);
         } else {
             ui_recent_requests_.push_back(std::move(terminal_request));
@@ -419,6 +438,7 @@ void HttpServer::record_request_done(const RequestLogContext& context,
 void HttpServer::record_request_failure(const RequestLogContext& context,
                                         const RequestFailure& failure) {
 #if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+    const std::string source = service_ ? service_->context_session_info().owner : "unknown";
     {
         std::lock_guard lock(ui_metrics_mutex_);
         ++ui_requests_failed_;
@@ -432,6 +452,7 @@ void HttpServer::record_request_failure(const RequestLogContext& context,
             UiRecentRequest terminal_request;
             terminal_request.id             = context.id;
             terminal_request.protocol       = context.protocol;
+            terminal_request.source         = source;
             terminal_request.status         = "failed";
             terminal_request.finished_at_ms = ui_uptime_ms();
             ui_recent_requests_.push_back(std::move(terminal_request));
@@ -498,6 +519,75 @@ void HttpServer::stop_stats_reporter() {
     stats_thread_.join();
 }
 
+ContextCacheHints HttpServer::request_cache_hints(const httplib::Request& req,
+                                                 ContextCacheHints hints) const {
+#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+    if (req.has_header("X-NInfer-Session")) {
+        const std::string value = req.get_header_value("X-NInfer-Session");
+        const auto allowed = [](unsigned char character) {
+            return (character >= 'a' && character <= 'z') ||
+                   (character >= 'A' && character <= 'Z') ||
+                   (character >= '0' && character <= '9') || character == '-' ||
+                   character == '_' || character == '.' || character == ':';
+        };
+        if (value.empty() || value.size() > 128 ||
+            !std::all_of(value.begin(), value.end(), allowed)) {
+            ApiError error;
+            error.code = "invalid_session_id";
+            error.param = "X-NInfer-Session";
+            error.message = "X-NInfer-Session must contain 1-128 ASCII letters, digits, . _ : or -";
+            throw ApiException(std::move(error));
+        }
+        hints.session_key = "client:" + value;
+    }
+#else
+    (void)req;
+#endif
+    return hints;
+}
+
+#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+void HttpServer::handle_ui_cache_clear(const httplib::Request& req, httplib::Response& res) {
+    require_local_control(req);
+    if (service_ == nullptr || !service_->is_available()) {
+        ApiError error;
+        error.status = 503;
+        error.code = "service_unavailable";
+        error.message = "inference service is unavailable";
+        throw ApiException(std::move(error));
+    }
+    try {
+        service_->clear_context_cache();
+    } catch (const ApiException& exception) {
+        ApiError error = exception.error();
+        if (error.status == 429) {
+            error.status = 409;
+            error.code = "context_busy";
+        }
+        write_openai_error(res, error);
+        return;
+    } catch (const std::logic_error& exception) {
+        ApiError error;
+        error.status = 409;
+        error.code = "context_busy";
+        error.message = exception.what();
+        write_openai_error(res, error);
+        return;
+    }
+    res.set_header("Cache-Control", "no-store");
+    res.set_content("{\"status\":\"cleared\"}", "application/json");
+}
+
+void HttpServer::handle_ui_shutdown(const httplib::Request& req, httplib::Response& res) {
+    require_local_control(req);
+    res.status = 202;
+    res.set_header("Cache-Control", "no-store");
+    res.set_header("Connection", "close");
+    res.set_content("{\"status\":\"shutdown_requested\"}", "application/json");
+    stop();
+}
+#endif
+
 void HttpServer::register_routes() {
     server_.set_error_handler([this](const httplib::Request& request, httplib::Response& response) {
         return handle_unrendered_http_error(options_, request, response);
@@ -508,7 +598,7 @@ void HttpServer::register_routes() {
              {"Access-Control-Expose-Headers", "x-request-id, request-id"},
              {"Access-Control-Allow-Headers",
               "Authorization, Content-Type, X-API-Key, anthropic-version, anthropic-beta, "
-              "anthropic-user-profile-id"},
+              "anthropic-user-profile-id, X-NInfer-Session"},
              {"Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS"}});
         // CORS preflight: browsers send OPTIONS with no credentials before the real
         // request; answer it without auth so the actual GET/POST can carry the key.
@@ -639,6 +729,12 @@ void HttpServer::register_routes() {
     server_.Get("/ui/metrics", [this](const httplib::Request& req, httplib::Response& res) {
         handle_ui_metrics(req, res);
     });
+    server_.Post("/ui/cache/clear", [this](const httplib::Request& req, httplib::Response& res) {
+        handle_ui_cache_clear(req, res);
+    });
+    server_.Post("/ui/shutdown", [this](const httplib::Request& req, httplib::Response& res) {
+        handle_ui_shutdown(req, res);
+    });
 #endif
     server_.Get("/v1/models", [this](const httplib::Request& req, httplib::Response& res) {
         handle_models(req, res);
@@ -746,6 +842,7 @@ void HttpServer::handle_ui_metrics(const httplib::Request&, httplib::Response& r
         recent.push_back(Json{
             {"id", request.id},
             {"protocol", request.protocol},
+            {"source", request.source},
             {"status", request.status},
             {"prompt_tokens", optional_json(request.prompt_tokens)},
             {"completion_tokens", optional_json(request.completion_tokens)},
@@ -759,7 +856,7 @@ void HttpServer::handle_ui_metrics(const httplib::Request&, httplib::Response& r
         });
     }
 
-    const Json response{
+    Json response{
         {"schema_version", 1},
         {"server_instance_id", ui_server_instance_id_},
         {"uptime_ms", ui_uptime_ms()},
@@ -783,6 +880,13 @@ void HttpServer::handle_ui_metrics(const httplib::Request&, httplib::Response& r
         {"recent_requests", std::move(recent)},
     };
 
+    if (service_ != nullptr) {
+        const ContextSessionInfo session = service_->context_session_info();
+        response["context_session"] = Json{{"mode", "exclusive"},
+                                           {"busy", session.busy},
+                                           {"owner", session.owner},
+                                           {"switch_count", session.switch_count}};
+    }
     res.status = available ? 200 : 503;
     res.set_header("Cache-Control", "no-store");
     res.set_content(response.dump(), "application/json");
@@ -830,6 +934,9 @@ bool HttpServer::listen() {
     }
 }
 
-void HttpServer::stop() { server_.stop(); }
+void HttpServer::stop() {
+    if (service_ != nullptr) { service_->request_shutdown(); }
+    server_.stop();
+}
 
 } // namespace ninfer::serve

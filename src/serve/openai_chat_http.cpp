@@ -1,3 +1,4 @@
+// Modified for the Windows/V100 port by taotuotu, 2026; see NOTICE.
 #include "serve/http_server.h"
 
 #include "serve/http_transport.h"
@@ -48,7 +49,8 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
         prepared = service_->prepare(request.generation,
                                      request.stream ? GenerationConsumerMode::Streaming
                                                     : GenerationConsumerMode::Aggregate,
-                                     observation, [&req] { return client_disconnected(req); });
+                                     observation, [&req] { return client_disconnected(req); },
+                                     request_cache_hints(req));
     } catch (const ApiException& exception) {
         record_request_rejected(make_request_rejection_log_context(
             req_id, "openai_chat_completions", request.generation, metadata, exception.error()));

@@ -5,12 +5,15 @@
 #include "serve/translate.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <filesystem>
 #include <iterator>
+#include <iomanip>
 #include <mutex>
 #include <stdexcept>
+#include <sstream>
 #include <string>
 #include <utility>
 
@@ -22,6 +25,12 @@ struct RequestCapacity {
     std::mutex mutex;
     std::size_t active = 0;
     const std::size_t maximum;
+    std::atomic<bool> stopping{false};
+#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+    std::string cache_session;
+    std::string cache_owner = "none";
+    std::uint64_t cache_switch_count = 0;
+#endif
 };
 
 struct RequestLifetime {
@@ -93,6 +102,28 @@ ApiError request_error_to_api_error(const ninfer::RequestError& exception) {
 namespace {
 
 using Clock = std::chrono::steady_clock;
+
+#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+// An ownership hint for clients without a session header; never a proof of prefix identity.
+std::string automatic_session_key(const GenerationRequest& request) {
+    std::uint64_t digest = 14695981039346656037ULL;
+    const auto add = [&](std::string_view value) {
+        for (const unsigned char byte : value) { digest = (digest ^ byte) * 1099511628211ULL; }
+        digest = (digest ^ 0xffU) * 1099511628211ULL;
+    };
+    for (const ChatTurn& turn : request.messages) {
+        if (turn.role != ChatRole::User) { continue; }
+        for (const ContentPart& part : turn.content) {
+            add(std::to_string(static_cast<int>(part.kind)));
+            add(part.kind == ContentKind::Text ? part.text : part.source.value);
+        }
+        break;
+    }
+    std::ostringstream key;
+    key << "api-auto-" << std::hex << std::setw(16) << std::setfill('0') << digest;
+    return key.str();
+}
+#endif
 
 [[noreturn]] void throw_preparation_cancelled();
 
@@ -235,6 +266,9 @@ private:
 GenerationService::GenerationService(ServeOptions options, StartupObserver startup_observer)
     : options_(std::move(options)) {
 #if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+    if (options_.max_concurrency != 1) {
+        throw std::invalid_argument("the Windows server accepts one inference request at a time");
+    }
     if (options_.enable_vision) {
         throw std::invalid_argument(
             "Vision is unavailable in this text-only Windows server build");
@@ -262,7 +296,11 @@ GenerationService::GenerationService(ServeOptions options, StartupObserver start
     engine_              = std::make_unique<ninfer::Engine>(std::move(engine_options));
     prompt_capabilities_ = engine_->prompt_capabilities();
     request_capacity_    = std::make_shared<RequestCapacity>(
+#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+        1);
+#else
         static_cast<std::size_t>(options_.max_concurrency) + options_.max_pending_requests);
+#endif
 }
 
 std::shared_ptr<RequestLifetime>
@@ -270,9 +308,22 @@ GenerationService::acquire_request_lifetime(DeadlinePolicy deadline_policy) cons
     const auto started = Clock::now();
     {
         std::lock_guard lock(request_capacity_->mutex);
+        if (request_capacity_->stopping.load(std::memory_order_acquire)) {
+            throw_request_error(ninfer::RequestError(RequestErrorKind::Unavailable,
+                                                     "inference service is shutting down"));
+        }
         if (request_capacity_->active >= request_capacity_->maximum) {
+#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+            ApiError error;
+            error.status = 429;
+            error.type = "rate_limit_error";
+            error.code = "inference_busy";
+            error.message = "another inference request is active; retry after it finishes";
+            throw ApiException(std::move(error));
+#else
             throw_request_error(ninfer::RequestError(RequestErrorKind::Overloaded,
                                                      "inference request queue is full"));
+#endif
         }
         ++request_capacity_->active;
     }
@@ -323,7 +374,22 @@ PreparedRequest GenerationService::prepare_impl(const GenerationRequest& request
     }
     prepared.lifetime = acquire_request_lifetime(deadline_policy);
 
+    const auto client_cancelled = std::move(is_cancelled);
+    is_cancelled = [capacity = request_capacity_, client_cancelled] {
+        return capacity->stopping.load(std::memory_order_acquire) ||
+               (client_cancelled && client_cancelled());
+    };
+
     try {
+        check_preparation_control(prepared.lifetime->deadline, is_cancelled);
+#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+        if (cache_participation == CacheParticipation::ReadWrite) {
+            if (!context_cache.session_key) {
+                context_cache.session_key = automatic_session_key(request);
+            }
+        }
+        const auto requested_session = context_cache.session_key;
+#endif
         const auto acquisition_started = Clock::now();
         std::size_t remaining_media_bytes =
             std::min(options_.max_request_bytes, ninfer::kMaximumPromptMediaBytes);
@@ -342,6 +408,16 @@ PreparedRequest GenerationService::prepare_impl(const GenerationRequest& request
         input.context_cache.allow_engine_automatic_shared_prefixes =
             input.context_cache.allow_engine_automatic_shared_prefixes &&
             protocol_allows_engine_automatic;
+#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+        // Actively maintain this owner's shared frontier. Explicit-disabled writes remain
+        // absent; exact matching and physical feasibility remain Engine policy.
+        for (PromptCacheMarker& marker : input.context_cache.markers) {
+            if (has_shared_candidate_evidence(marker.evidence,
+                                               SharedCandidateEvidence::DefaultAutomatic)) {
+                marker.evidence |= SharedCandidateEvidence::RequestedAutomatic;
+            }
+        }
+#endif
         prepared.acquisition_seconds =
             std::chrono::duration<double>(Clock::now() - acquisition_started).count();
         check_preparation_control(prepared.lifetime->deadline, is_cancelled);
@@ -351,6 +427,24 @@ PreparedRequest GenerationService::prepare_impl(const GenerationRequest& request
         };
         ninfer::PreparedPrompt prompt = engine_->prepare(std::move(input), control);
         check_preparation_control(prepared.lifetime->deadline, is_cancelled);
+#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+        if (cache_participation == CacheParticipation::ReadWrite && requested_session) {
+            bool changed = false;
+            {
+                std::lock_guard lock(request_capacity_->mutex);
+                changed = request_capacity_->cache_session != *requested_session;
+            }
+            if (changed) {
+                // A fully prepared/validated request may replace the current owner's cache.
+                engine_->clear_context_cache();
+                std::lock_guard lock(request_capacity_->mutex);
+                request_capacity_->cache_session = *requested_session;
+                request_capacity_->cache_owner = requested_session->starts_with("client:web-")
+                                                     ? "web" : "api";
+                ++request_capacity_->cache_switch_count;
+            }
+        }
+#endif
         prepared.prompt_tokens = static_cast<int>(prompt.summary().prompt_tokens);
         prepared.preparation   = prompt.preparation_stats();
         prepared.prepare_seconds =
@@ -408,13 +502,11 @@ GenerationOutcome GenerationService::run(PreparedRequest& prepared, const Stream
     std::unique_ptr<ServiceOutputSink> output_sink;
     if (sink != nullptr) { output_sink = std::make_unique<ServiceOutputSink>(*sink); }
     ninfer::OutputSink* public_sink = output_sink.get();
-    ninfer::CancellationView cancellation;
-    if (is_cancelled || (sink != nullptr && sink->is_cancelled)) {
-        cancellation = ninfer::CancellationView([external = std::move(is_cancelled), sink]() {
-            return (external && external()) ||
-                   (sink != nullptr && sink->is_cancelled && sink->is_cancelled());
-        });
-    }
+    ninfer::CancellationView cancellation([capacity = request_capacity_,
+                                             external = std::move(is_cancelled), sink]() {
+        return capacity->stopping.load(std::memory_order_acquire) || (external && external()) ||
+               (sink != nullptr && sink->is_cancelled && sink->is_cancelled());
+    });
 
     ninfer::GenerationResult result;
     try {
@@ -459,6 +551,27 @@ GenerationOutcome GenerationService::run(PreparedRequest& prepared, const Stream
     outcome.tool_call_parse = result.tool_call_parse;
     return outcome;
 }
+
+void GenerationService::request_shutdown() noexcept {
+    request_capacity_->stopping.store(true, std::memory_order_release);
+}
+
+#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+ContextSessionInfo GenerationService::context_session_info() const {
+    std::lock_guard lock(request_capacity_->mutex);
+    return {.busy = request_capacity_->active != 0,
+            .owner = request_capacity_->cache_owner,
+            .switch_count = request_capacity_->cache_switch_count};
+}
+
+void GenerationService::clear_context_cache() const {
+    auto reservation = acquire_request_lifetime(DeadlinePolicy::ClientPendingTimeout);
+    engine_->clear_context_cache();
+    std::lock_guard lock(request_capacity_->mutex);
+    request_capacity_->cache_session.clear();
+    request_capacity_->cache_owner = "none";
+}
+#endif
 
 void GenerationService::warmup() {
     GenerationRequest request;

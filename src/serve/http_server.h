@@ -101,14 +101,19 @@ private:
     void record_throughput(const ThroughputReport& report);
     void run_stats_reporter();
     void stop_stats_reporter();
+    [[nodiscard]] ContextCacheHints request_cache_hints(
+        const httplib::Request& req, ContextCacheHints hints = {}) const;
 #if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
     void handle_ui_metrics(const httplib::Request& req, httplib::Response& res) const;
+    void handle_ui_cache_clear(const httplib::Request& req, httplib::Response& res);
+    void handle_ui_shutdown(const httplib::Request& req, httplib::Response& res);
     [[nodiscard]] std::uint64_t ui_uptime_ms() const noexcept;
     void trim_ui_request_history_locked();
 
     struct UiRecentRequest {
         std::uint64_t id = 0;
         std::string protocol;
+        std::string source = "unknown";
         std::string status;
         std::optional<int> prompt_tokens;
         std::optional<int> completion_tokens;

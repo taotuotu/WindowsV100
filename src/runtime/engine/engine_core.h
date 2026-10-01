@@ -185,6 +185,10 @@ public:
                 throw RequestError(RequestErrorKind::Unavailable,
                                    "inference engine is unavailable");
             }
+            if (context_cache_clear_pending_) {
+                throw RequestError(RequestErrorKind::Unavailable,
+                                   "context cache clear is in progress");
+            }
             if (outstanding_ >= max_outstanding_) {
                 throw RequestError(RequestErrorKind::Overloaded, "inference request queue is full");
             }
@@ -192,6 +196,8 @@ public:
                 throw std::overflow_error("request identity space exhausted");
             }
             ++outstanding_;
+            ++nonterminal_requests_;
+            ++submissions_in_progress_;
             request_id        = next_request_id_++;
             publication_order = next_publication_order_++;
         }
@@ -214,18 +220,24 @@ public:
                                                 std::move(options), consumer_mode, observation,
                                                 pending_deadline, submitted);
         } catch (...) {
-            release_reserved_capacity();
+            release_submission_reservation();
             throw;
         }
 
         {
             std::lock_guard lock(queue_mutex_);
             if (stopping_ || failed_) {
-                --outstanding_;
+                release_submission_reservation_locked();
                 throw RequestError(RequestErrorKind::Unavailable,
                                    "inference engine is unavailable");
             }
-            pending_.push_back(request);
+            try {
+                pending_.push_back(request);
+            } catch (...) {
+                release_submission_reservation_locked();
+                throw;
+            }
+            --submissions_in_progress_;
         }
         request_admission_check();
         queue_cv_.notify_one();
@@ -254,9 +266,30 @@ public:
         return published_stats_;
     }
 
+    void clear_context_cache() {
+        auto completion = std::make_shared<std::promise<void>>();
+        std::future<void> completed = completion->get_future();
+        {
+            std::lock_guard lock(queue_mutex_);
+            if (stopping_ || failed_) {
+                throw RequestError(RequestErrorKind::Unavailable,
+                                   "inference engine is unavailable");
+            }
+            if (!pending_.empty() || submissions_in_progress_ != 0 ||
+                nonterminal_requests_ != 0 || context_cache_clear_pending_) {
+                throw std::logic_error(
+                    "context cache can only be cleared while the Engine is idle");
+            }
+            context_cache_clear_pending_ = true;
+            clear_context_cache_completion_ = std::move(completion);
+        }
+        queue_cv_.notify_one();
+        completed.get();
+    }
+
     [[nodiscard]] bool is_available() const {
         std::lock_guard lock(queue_mutex_);
-        return !stopping_ && !failed_;
+        return !stopping_ && !failed_ && !context_cache_clear_pending_;
     }
 
     void reset_memory_peaks() noexcept {
@@ -267,6 +300,33 @@ public:
     }
 
 private:
+    void release_submission_reservation() noexcept {
+        std::lock_guard lock(queue_mutex_);
+        release_submission_reservation_locked();
+    }
+
+    void release_submission_reservation_locked() noexcept {
+        if (outstanding_ != 0) { --outstanding_; }
+        if (submissions_in_progress_ != 0) { --submissions_in_progress_; }
+        if (nonterminal_requests_ != 0) { --nonterminal_requests_; }
+    }
+
+    void mark_nonterminal_completed() noexcept {
+        std::lock_guard lock(queue_mutex_);
+        if (nonterminal_requests_ != 0) { --nonterminal_requests_; }
+    }
+
+    [[nodiscard]] bool worker_quiescent_locked() const noexcept {
+        if (!pending_.empty() || submissions_in_progress_ != 0 || nonterminal_requests_ != 0 ||
+            context_cache_clear_pending_ || materializing_.has_value()) {
+            return false;
+        }
+        for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
+            if (slots_[lane] != nullptr) { return false; }
+        }
+        return true;
+    }
+
     enum class HostWorkClass : std::uint8_t {
         Decode,
         Prefill,
@@ -819,6 +879,7 @@ private:
             request->response_done = true;
         }
         if (mark_completed(request)) { release_reserved_capacity(); }
+        mark_nonterminal_completed();
         request->cv.notify_one();
     }
 
@@ -886,6 +947,7 @@ private:
             request->response_done = true;
         }
         if (mark_completed(request)) { release_reserved_capacity(); }
+        mark_nonterminal_completed();
         request->cv.notify_one();
     }
 
@@ -1925,28 +1987,85 @@ private:
     void worker_loop() noexcept {
         bool previous_unit_was_decode = false;
         for (;;) {
+            std::shared_ptr<std::promise<void>> clear_cache_completion;
+            std::shared_ptr<std::promise<void>> abandoned_clear_completion;
+            bool shutdown = false;
             {
                 std::unique_lock lock(queue_mutex_);
-                if (!stopping_ && pending_.empty()) {
-                    bool active = materializing_.has_value();
-                    for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
-                        active = active || slots_[lane] != nullptr;
-                    }
-                    if (!active) {
-                        queue_cv_.wait(lock, [&] { return stopping_ || !pending_.empty(); });
-                    }
+                if (!stopping_ && worker_quiescent_locked()) {
+                    queue_cv_.wait(lock, [&] {
+                        return stopping_ || !pending_.empty() ||
+                               clear_context_cache_completion_ != nullptr;
+                    });
                 }
                 if (stopping_) {
-                    lock.unlock();
-                    const auto error = std::make_exception_ptr(RequestError(
-                        RequestErrorKind::Unavailable, "inference engine is shutting down"));
-                    std::scoped_lock execution_lock(execution_mutex_);
-                    fail_all_locked(error);
-                    return;
+                    abandoned_clear_completion =
+                        std::move(clear_context_cache_completion_);
+                    context_cache_clear_pending_ = false;
+                    shutdown = true;
+                } else {
+                    clear_cache_completion = std::move(clear_context_cache_completion_);
                 }
             }
 
+            if (shutdown) {
+                const auto error = std::make_exception_ptr(RequestError(
+                    RequestErrorKind::Unavailable, "inference engine is shutting down"));
+                {
+                    std::scoped_lock execution_lock(execution_mutex_);
+                    fail_all_locked(error);
+                }
+                if (abandoned_clear_completion != nullptr) {
+                    try {
+                        abandoned_clear_completion->set_exception(error);
+                    } catch (...) {}
+                }
+                return;
+            }
+
             std::unique_lock execution_lock(execution_mutex_);
+            if (clear_cache_completion != nullptr) {
+                std::exception_ptr clear_error;
+                bool release_started = false;
+                try {
+                    {
+                        std::lock_guard lock(queue_mutex_);
+                        if (!pending_.empty() || submissions_in_progress_ != 0 ||
+                            nonterminal_requests_ != 0) {
+                            throw std::logic_error(
+                                "context cache clear reached the worker while the Engine was busy");
+                        }
+                    }
+                    resources_.clear_inactive_context_cache(*instance_.program,
+                                                            release_started);
+                } catch (...) {
+                    clear_error = std::current_exception();
+                    if (release_started) { fail_all_locked(clear_error); }
+                }
+                if (clear_error == nullptr) {
+                    try {
+                        publish_runtime_stats();
+                    } catch (...) {
+                        clear_error = std::current_exception();
+                    }
+                }
+                execution_lock.unlock();
+                {
+                    std::lock_guard lock(queue_mutex_);
+                    context_cache_clear_pending_ = false;
+                }
+                queue_cv_.notify_all();
+                try {
+                    if (clear_error != nullptr) {
+                        clear_cache_completion->set_exception(clear_error);
+                    } else {
+                        clear_cache_completion->set_value();
+                    }
+                } catch (...) {}
+                continue;
+            }
+
+            const auto finish_execution_boundary = [&] { execution_lock.unlock(); };
             try {
                 set_host_work_class(HostWorkClass::Control);
                 HostPhaseMeasurement boundary = begin_host_phase();
@@ -1979,6 +2098,7 @@ private:
                     finish_engine_phase(boundary, EngineHostPhase::Boundary);
                     run_control_batch(control_membership);
                     previous_unit_was_decode = true;
+                    finish_execution_boundary();
                     continue;
                 }
                 membership = scheduler_.build_round_membership(slots_, max_concurrency_);
@@ -1997,6 +2117,7 @@ private:
                     finish_engine_phase(boundary, EngineHostPhase::Boundary);
                     run_prefill_step(cancelled_at_unit_start);
                     previous_unit_was_decode = false;
+                    finish_execution_boundary();
                     continue;
                 }
                 if (action == ExecutionAction::Decode) {
@@ -2004,6 +2125,7 @@ private:
                     finish_engine_phase(boundary, EngineHostPhase::Boundary);
                     run_decode_round(membership, cancelled_at_unit_start);
                     previous_unit_was_decode = true;
+                    finish_execution_boundary();
                     continue;
                 }
                 set_host_work_class(HostWorkClass::Control);
@@ -2018,7 +2140,7 @@ private:
                 } catch (...) {}
                 return;
             }
-            execution_lock.unlock();
+            finish_execution_boundary();
             std::unique_lock wait_lock(queue_mutex_);
             queue_cv_.wait_for(wait_lock, std::chrono::milliseconds(1));
         }
@@ -2038,8 +2160,11 @@ private:
     std::condition_variable queue_cv_;
     std::deque<std::shared_ptr<Request>> pending_;
     std::size_t outstanding_              = 0;
+    std::size_t nonterminal_requests_      = 0;
+    std::size_t submissions_in_progress_  = 0;
     std::uint64_t next_request_id_        = 1;
     std::uint64_t next_publication_order_ = 1;
+    std::shared_ptr<std::promise<void>> clear_context_cache_completion_;
     std::array<std::shared_ptr<Request>, kMaximumConcurrency> slots_{};
     std::optional<MaterializingRequest> materializing_;
     Scheduling scheduler_;
@@ -2050,8 +2175,9 @@ private:
     std::size_t current_decode_lane_count_ = 0;
     RuntimeStats cumulative_stats_;
     RuntimeStats published_stats_;
-    bool stopping_ = false;
-    bool failed_   = false;
+    bool context_cache_clear_pending_ = false;
+    bool stopping_                    = false;
+    bool failed_                      = false;
     std::thread worker_;
 };
 

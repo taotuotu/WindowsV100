@@ -462,7 +462,8 @@ if ($Package -in @('binary', 'both')) {
     foreach ($rootFile in @(
         'README.md', 'LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.md',
         'start-ninfer.bat', 'stop-ninfer.bat', 'open-chat.bat',
-        'scripts\run-ninfer-server.ps1', 'scripts\download-model.ps1', 'scripts\model-v2.json'
+        'scripts\run-ninfer-server.ps1', 'scripts\stop-ninfer.ps1',
+        'scripts\download-model.ps1', 'scripts\model-v2.json'
     )) {
         Add-PackageFile $binaryFiles (Join-Path $repoRoot $rootFile) $rootFile
     }

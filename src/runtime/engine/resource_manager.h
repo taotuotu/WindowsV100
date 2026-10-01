@@ -269,6 +269,68 @@ public:
         }
     }
 
+    // Called only by EngineCore's worker at an idle boundary. Keep logical ownership and
+    // physical Program resources in lockstep; active lanes and open transactions are never
+    // rolled back by this operation.
+    void clear_inactive_context_cache(Program& program, bool& release_started) {
+        release_started = false;
+        if (!std::holds_alternative<std::monostate>(transaction_) ||
+            program.has_context_transaction()) {
+            throw std::logic_error("cannot clear context cache during a context transaction");
+        }
+        for (std::uint32_t lane = 0; lane < lane_count_; ++lane) {
+            if (lanes_[lane] != LogicalLaneState::Free || active_[lane].occupied) {
+                throw std::logic_error("cannot clear context cache while a lane is active");
+            }
+        }
+        for (std::uint32_t slot = 0; slot < catalog_count_; ++slot) {
+            const CatalogEntry& entry = catalog_[slot];
+            if (entry.state == CatalogState::Catalogued) {
+                if (!entry.handle || private_has_active_edge(slot)) {
+                    throw std::logic_error("private context cache entry is not inactive");
+                }
+            } else if (entry.state != CatalogState::Vacant || entry.handle) {
+                throw std::logic_error("private context cache contains an active claim");
+            }
+        }
+        for (std::uint32_t slot = 0; slot < shared_catalog_count_; ++slot) {
+            const SharedCatalogEntry& entry = shared_catalog_[slot];
+            if (entry.state == SharedCatalogState::Catalogued) {
+                if (!entry.handle || entry.transaction_pins != 0 ||
+                    shared_active_edge_count(slot) != 0) {
+                    throw std::logic_error("shared context cache entry is not inactive");
+                }
+            } else if (entry.state != SharedCatalogState::Vacant || entry.handle ||
+                       entry.transaction_pins != 0) {
+                throw std::logic_error("shared context cache contains an active claim");
+            }
+        }
+
+        // Private continuations may hold references to shared prefix state, so release them
+        // before releasing the shared catalog owners.
+        for (CatalogEntry& entry : catalog_) {
+            if (entry.state != CatalogState::Catalogued) { continue; }
+            release_started = true;
+            const auto released = program.release_continuation(std::move(*entry.handle));
+            if (released.status != ConsumeStatus::Consumed) {
+                throw std::logic_error("Program rejected an inactive continuation release");
+            }
+            clear_catalog_entry(entry);
+        }
+        for (SharedCatalogEntry& entry : shared_catalog_) {
+            if (entry.state != SharedCatalogState::Catalogued) { continue; }
+            release_started = true;
+            const auto released = program.release_shared_prefix(std::move(*entry.handle));
+            if (released.status != ConsumeStatus::Consumed) {
+                throw std::logic_error("Program rejected an inactive shared-prefix release");
+            }
+            clear_shared_entry(entry);
+        }
+        for (SessionIndexEntry& entry : session_index_) { entry = {}; }
+        for (PrefixIndexEntry& entry : prefix_index_) { entry = {}; }
+        demand_window_.clear();
+    }
+
     [[nodiscard]] Inspection inspect(Program& program, const PreparedPrompt& prompt,
                                      const RequestBasePlan& base, std::uint64_t publication_order) {
         if (!std::holds_alternative<std::monostate>(transaction_) ||

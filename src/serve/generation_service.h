@@ -1,3 +1,4 @@
+// Modified for the Windows/V100 port by taotuotu, 2026; see NOTICE.
 #pragma once
 
 // Product-side adapter from one protocol-neutral generation request to the public Engine. Wire
@@ -20,6 +21,14 @@ namespace ninfer::serve {
 
 struct RequestLifetime;
 struct RequestCapacity;
+
+#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+struct ContextSessionInfo {
+    bool busy = false;
+    std::string owner = "none";
+    std::uint64_t switch_count = 0;
+};
+#endif
 
 struct GenerationMetrics {
     double prepare_seconds         = 0.0;
@@ -79,6 +88,8 @@ ApiError request_error_to_api_error(const ninfer::RequestError& exception);
 // request keeps its ingress/response lifetime reservation until the HTTP response is released and
 // is consumed exactly once by run().
 struct PreparedRequest {
+    // Release ingress capacity after the generation handle is destroyed/cancelled.
+    std::shared_ptr<RequestLifetime> lifetime;
     ninfer::GenerationHandle generation;
     ninfer::ResolvedSamplingParameters sampling;
     double prepare_seconds     = 0.0;
@@ -89,7 +100,6 @@ struct PreparedRequest {
     std::optional<std::uint32_t> thinking_budget;
     std::optional<ninfer::ReasoningEffort> effective_reasoning_effort;
     bool preserve_thinking = false;
-    std::shared_ptr<RequestLifetime> lifetime;
 };
 
 class GenerationService {
@@ -131,6 +141,11 @@ public:
                           std::function<bool()> is_cancelled = {});
 
     void warmup();
+    void request_shutdown() noexcept;
+#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+    [[nodiscard]] ContextSessionInfo context_session_info() const;
+    void clear_context_cache() const;
+#endif
 
 private:
     enum class CacheParticipation : std::uint8_t {

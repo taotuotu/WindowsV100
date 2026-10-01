@@ -534,6 +534,25 @@ bool Engine::is_available() const {
         impl_->core);
 }
 
+void Engine::clear_context_cache() {
+    if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
+    if (impl_->options.purpose != EnginePurpose::Generation) {
+        throw std::logic_error("clear_context_cache requires a Generation Engine");
+    }
+    std::visit(
+        [](auto& core) {
+            using CoreState = std::remove_cvref_t<decltype(core)>;
+            if constexpr (std::is_same_v<CoreState, std::unique_ptr<Impl::Core27>> ||
+                          std::is_same_v<CoreState, std::unique_ptr<Impl::Core35>>) {
+                if (core == nullptr) { throw std::logic_error("Engine core is unavailable"); }
+                core->clear_context_cache();
+            } else {
+                throw std::logic_error("clear_context_cache requires a Generation Engine");
+            }
+        },
+        impl_->core);
+}
+
 void Engine::reset_memory_peaks() noexcept {
     if (impl_ == nullptr) { return; }
     std::visit(
