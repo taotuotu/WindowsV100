@@ -1,5 +1,5 @@
 <!-- Modified for the Windows/V100 port by taotuotu, 2026; see NOTICE. -->
-# NInfer Windows / V100
+# The Ultimate V100 Windows Local Inference Engine for Qwen3.8-27B
 
 在 Windows 上运行 Qwen3.8-27B：常驻本地 API、自带浏览器聊天、真实 token 速率和前缀缓存。
 
