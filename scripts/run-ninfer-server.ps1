@@ -11,6 +11,9 @@ param(
     [string]$ApiKey,
     [string]$RequestLog,
     [switch]$Stop,
+    [switch]$OpenChat,
+    [ValidateRange(1, 86400)]
+    [int]$ReadyTimeoutSeconds = 600,
     [string]$BuildDirectory = '',
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$ServerArguments = @()
@@ -112,6 +115,7 @@ if ($probeHost -eq 'localhost') { $probeHost = '127.0.0.1' }
 $uriHost = $probeHost
 if ($uriHost.Contains(':')) { $uriHost = '[' + $uriHost + ']' }
 $baseUri = 'http://' + $uriHost + ':' + $Port
+$chatUrl = $baseUri + '/'
 
 function Get-SelectedListenAddresses {
     param([string]$HostName)
@@ -168,7 +172,134 @@ function Get-ListenersOnPort {
     }
 }
 
+function Get-NInferProcessesForPort {
+    param(
+        [string]$ExecutablePath,
+        [int]$LocalPort
+    )
+
+    try {
+        $records = @(Get-CimInstance -ClassName Win32_Process -Filter "Name='$([System.IO.Path]::GetFileName($ExecutablePath))'" -ErrorAction Stop)
+    } catch {
+        throw ('Cannot inspect running NInfer processes safely: {0}' -f $_.Exception.Message)
+    }
+
+    $matching = @()
+    foreach ($record in $records) {
+        $commandLine = [string]$record.CommandLine
+        $portMatch = [regex]::Match($commandLine, '(?:^|\s)"?--port"?\s+(?:"(?<quoted>\d+)"|(?<plain>\d+))(?=\s|$)')
+        if ($portMatch.Success) {
+            $processPort = if ($portMatch.Groups['quoted'].Success) { $portMatch.Groups['quoted'].Value } else { $portMatch.Groups['plain'].Value }
+            if ($processPort -ne [string]$LocalPort) { continue }
+        } elseif ($commandLine -match '(?:^|\s)"?--port"?(?:\s|$)' -or $LocalPort -ne 8110) {
+            continue
+        }
+
+        if ([string]::IsNullOrWhiteSpace([string]$record.ExecutablePath)) {
+            throw ('Cannot verify executable path for PID {0} using port {1}; no second server was started.' -f $record.ProcessId, $LocalPort)
+        }
+        $recordPath = [System.IO.Path]::GetFullPath([string]$record.ExecutablePath)
+        if ($recordPath -ieq $ExecutablePath) { $matching += $record }
+    }
+    return $matching
+}
+
+function Get-HttpStatusCodeFromException {
+    param([System.Exception]$Exception)
+    $current = $Exception
+    while ($null -ne $current) {
+        try {
+            if ($null -ne $current.Response -and $null -ne $current.Response.StatusCode) {
+                return [int]$current.Response.StatusCode
+            }
+        } catch { }
+        try {
+            if ($null -ne $current.StatusCode) { return [int]$current.StatusCode }
+        } catch { }
+        $current = $current.InnerException
+    }
+    return $null
+}
+
+function Get-NInferServiceProbe {
+    param(
+        [string]$ServiceUri,
+        [string]$ProbeApiKey
+    )
+
+    $result = [pscustomobject]@{
+        HealthOk = $false
+        ModelListAvailable = $false
+        ModelIds = @()
+        ModelsAuthStatusCode = $null
+    }
+    try {
+        $health = Invoke-RestMethod -Uri "$ServiceUri/health" -TimeoutSec 2
+    } catch {
+        return $result
+    }
+    $result.HealthOk = $health.status -eq 'ok'
+    if (-not $result.HealthOk) { return $result }
+
+    try {
+        if ($ProbeApiKey) {
+            $models = Invoke-RestMethod -Uri "$ServiceUri/v1/models" -Headers @{ Authorization = "Bearer $ProbeApiKey" } -TimeoutSec 2
+        } else {
+            $models = Invoke-RestMethod -Uri "$ServiceUri/v1/models" -TimeoutSec 2
+        }
+        $result.ModelListAvailable = $true
+        $result.ModelIds = @($models.data | ForEach-Object { [string]$_.id })
+    } catch {
+        $statusCode = Get-HttpStatusCodeFromException -Exception $_.Exception
+        if ($statusCode -in @(401, 403)) { $result.ModelsAuthStatusCode = $statusCode }
+    }
+    return $result
+}
+
+function Assert-NInferListenerExecutable {
+    param(
+        [string]$HostName,
+        [int]$LocalPort,
+        [string]$ExpectedExecutable
+    )
+
+    $selectedAddresses = @(Get-SelectedListenAddresses $HostName)
+    $listeners = @(Get-ListenersOnPort $LocalPort | Where-Object {
+        $selectedAddresses -contains ([string]$_.LocalAddress).Trim([char[]]@('[', ']'))
+    })
+    if ($listeners.Count -eq 0) {
+        throw ('The API at port {0} responded, but no listener on the configured address could be verified as {1}.' -f $LocalPort, $ExpectedExecutable)
+    }
+
+    foreach ($listener in $listeners) {
+        $listenerId = [int]$listener.OwningProcess
+        try {
+            $listenerProcess = Get-Process -Id $listenerId -ErrorAction Stop
+            if (-not $listenerProcess.Path) { throw 'process path unavailable' }
+            $listenerPath = [System.IO.Path]::GetFullPath($listenerProcess.Path)
+        } catch {
+            throw ('Cannot verify listener PID {0} on port {1}; refusing to reuse the API.' -f $listenerId, $LocalPort)
+        }
+        if ($listenerPath -ine $ExpectedExecutable) {
+            throw ('Port {0} is serving an API from PID {1} at {2}, not the selected NInfer executable {3}; refusing to reuse it.' -f
+                $LocalPort, $listenerId, $listenerPath, $ExpectedExecutable)
+        }
+    }
+}
+
+function Get-ModelsAuthorizationError {
+    param(
+        [string]$ConfiguredApiKey,
+        [int]$StatusCode
+    )
+    if ($ConfiguredApiKey) {
+        return ('GET /v1/models rejected the configured API key with HTTP {0}. Check the key in .local\windows-server.psd1 or pass -ApiKey.' -f $StatusCode)
+    }
+    return ('GET /v1/models returned HTTP {0}, and no API key is configured. Set ApiKey in .local\windows-server.psd1 or pass -ApiKey.' -f $StatusCode)
+}
+
 if ($Stop) {
+    if ($OpenChat) { throw '-OpenChat cannot be combined with -Stop.' }
     $selectedAddresses = Get-SelectedListenAddresses $listenArgument
     $listeners = Get-ListenersOnPort $Port
     $matchingListeners = @($listeners | Where-Object {
@@ -205,22 +336,32 @@ if ($Stop) {
 
 # Avoid loading a second copy of the model when this port already serves the expected API.
 $modelAlias = 'qwen3.8-27b'
+if ($OpenChat -and $ServerArguments) {
+    for ($index = 0; $index -lt $ServerArguments.Count; $index++) {
+        $argument = [string]$ServerArguments[$index]
+        if ($argument -match '^(--model-id)=(.*)$') {
+            throw 'In -OpenChat mode, pass --model-id and its value as separate server arguments.'
+        }
+        if ($argument -in @('--model', '-m', '--host', '--port', '--api-key') -or
+            $argument -match '^(--model|--host|--port|--api-key)=') {
+            throw ('In -OpenChat mode, use the named launcher parameter for {0} so readiness checks match the running service.' -f $argument.Split('=')[0])
+        }
+        if ($argument -eq '--model-id') {
+            if (($index + 1) -ge $ServerArguments.Count -or
+                [string]::IsNullOrWhiteSpace([string]$ServerArguments[$index + 1]) -or
+                [string]$ServerArguments[$index + 1] -match '^-') {
+                throw '--model-id in -OpenChat mode requires a non-empty value that does not begin with a dash.'
+            }
+            $modelAlias = [string]$ServerArguments[$index + 1]
+            $index++
+        }
+    }
+}
 $healthOk = $false
 $existingIds = @()
-try {
-    $health = Invoke-RestMethod -Uri "$baseUri/health" -TimeoutSec 2
-    $healthOk = $health.status -eq 'ok'
-    if ($healthOk) {
-        if ($ApiKey) {
-            $models = Invoke-RestMethod -Uri "$baseUri/v1/models" -Headers @{ Authorization = "Bearer $ApiKey" } -TimeoutSec 2
-        } else {
-            $models = Invoke-RestMethod -Uri "$baseUri/v1/models" -TimeoutSec 2
-        }
-        $existingIds = @($models.data | ForEach-Object { [string]$_.id })
-    }
-} catch {
-    # A protected or unrelated service is still detected by the TCP check below.
-}
+$initialProbe = Get-NInferServiceProbe -ServiceUri $baseUri -ProbeApiKey $ApiKey
+$healthOk = $initialProbe.HealthOk
+$existingIds = @($initialProbe.ModelIds)
 
 $portOpen = $false
 $client = [System.Net.Sockets.TcpClient]::new()
@@ -237,11 +378,28 @@ try {
 }
 if ($portOpen) {
     if ($healthOk -and $existingIds -contains $modelAlias) {
+        if ($OpenChat) {
+            Assert-NInferListenerExecutable -HostName $listenArgument -LocalPort $Port -ExpectedExecutable $serverExe
+            Write-Host "NInfer is already serving $modelAlias at $baseUri. Reusing the running service; this launch's model/device/context settings were not applied."
+            try {
+                Start-Process -FilePath $chatUrl -WindowStyle Normal -ErrorAction Stop | Out-Null
+            } catch {
+                Write-Warning ('The chat page could not be opened automatically: {0}' -f $_.Exception.Message)
+                Write-Host ('Open or copy this URL: {0}' -f $chatUrl)
+            }
+            return
+        }
         Write-Host "NInfer is already serving $modelAlias at $baseUri. Reusing the running service; this launch's model/device/context settings were not applied."
         return
     }
-    $reported = if ($existingIds.Count -gt 0) { $existingIds -join ', ' } else { 'model identity unavailable' }
-    throw "Port $Port on $probeHost is already in use ($reported). No process was stopped."
+    if (-not $OpenChat) {
+        $reported = if ($existingIds.Count -gt 0) { $existingIds -join ', ' } else { 'model identity unavailable' }
+        throw "Port $Port on $probeHost is already in use ($reported). No process was stopped."
+    }
+}
+if ($OpenChat -and $initialProbe.ModelsAuthStatusCode -in @(401, 403)) {
+    Assert-NInferListenerExecutable -HostName $listenArgument -LocalPort $Port -ExpectedExecutable $serverExe
+    throw (Get-ModelsAuthorizationError -ConfiguredApiKey $ApiKey -StatusCode $initialProbe.ModelsAuthStatusCode)
 }
 
 if (-not (Test-Path -LiteralPath $Model -PathType Leaf)) {
@@ -305,9 +463,215 @@ if (-not [string]::IsNullOrWhiteSpace($RequestLog)) {
 $serverArgs += @('--host', $listenArgument, '--port', "$Port", '--cors')
 if ($ServerArguments) { $serverArgs += $ServerArguments }
 
-Write-Host "Starting NInfer at $baseUri with device $Device and context $Context. Press Ctrl+C to stop."
+if ($OpenChat) {
+    Write-Host "Checking NInfer readiness at $baseUri. Ctrl+C stops only a server started by this launcher."
+} else {
+    Write-Host "Starting NInfer at $baseUri with device $Device and context $Context. Press Ctrl+C to stop."
+}
 Push-Location $repoRoot
 try {
+    if ($OpenChat) {
+        $mutexMaterial = $serverExe.ToUpperInvariant() + '|' + $Port
+        $sha256 = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            $mutexHash = [BitConverter]::ToString($sha256.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($mutexMaterial))).Replace('-', '')
+        } finally {
+            $sha256.Dispose()
+        }
+        $launcherMutex = [System.Threading.Mutex]::new($false, ('Local\NInferLauncher-' + $mutexHash))
+        $mutexOwned = $false
+        $startedServerProcess = $null
+        $readyDeadline = [DateTime]::UtcNow.AddSeconds($ReadyTimeoutSeconds)
+        try {
+            while ($true) {
+                # Always check readiness before the mutex. Another launcher may own the mutex
+                # while its native server is loading; a ready service can be reused immediately.
+                $probe = Get-NInferServiceProbe -ServiceUri $baseUri -ProbeApiKey $ApiKey
+                $probeHealthy = $probe.HealthOk
+                $probeIds = @($probe.ModelIds)
+                if ($probe.ModelsAuthStatusCode -in @(401, 403)) {
+                    Assert-NInferListenerExecutable -HostName $listenArgument -LocalPort $Port -ExpectedExecutable $serverExe
+                    throw (Get-ModelsAuthorizationError -ConfiguredApiKey $ApiKey -StatusCode $probe.ModelsAuthStatusCode)
+                }
+                if ($probeHealthy -and $probeIds -contains $modelAlias) {
+                    Assert-NInferListenerExecutable -HostName $listenArgument -LocalPort $Port -ExpectedExecutable $serverExe
+                    Write-Host "NInfer is ready with model $modelAlias at $baseUri."
+                    try {
+                        Start-Process -FilePath $chatUrl -WindowStyle Normal -ErrorAction Stop | Out-Null
+                    } catch {
+                        Write-Warning ('The chat page could not be opened automatically: {0}' -f $_.Exception.Message)
+                        Write-Host ('Open or copy this URL: {0}' -f $chatUrl)
+                    }
+                    if ($startedServerProcess) {
+                        $startedServerProcess.WaitForExit()
+                        if ($startedServerProcess.ExitCode -ne 0) {
+                            throw "NInfer server exited with code $($startedServerProcess.ExitCode)."
+                        }
+                    }
+                    return
+                }
+
+                $portListeners = @(Get-ListenersOnPort $Port | Where-Object {
+                    (Get-SelectedListenAddresses $listenArgument) -contains ([string]$_.LocalAddress).Trim([char[]]@('[', ']'))
+                })
+                $matchingProcesses = @(Get-NInferProcessesForPort -ExecutablePath $serverExe -LocalPort $Port)
+
+                $matchingListenerPids = @()
+                foreach ($listener in $portListeners) {
+                    $listenerId = [int]$listener.OwningProcess
+                    try {
+                        $listenerProcess = Get-Process -Id $listenerId -ErrorAction Stop
+                        if (-not $listenerProcess.Path) { throw 'process path unavailable' }
+                        $listenerPath = [System.IO.Path]::GetFullPath($listenerProcess.Path)
+                    } catch {
+                        throw ('Cannot verify PID {0} on port {1}; no process was stopped or started.' -f $listenerId, $Port)
+                    }
+                    if ($listenerPath -ieq $serverExe) {
+                        $matchingListenerPids += $listenerId
+                    } else {
+                        throw ('Port {0} on {1} is occupied by PID {2} ({3}), not the NInfer server executable. No process was stopped or started.' -f
+                            $Port, $probeHost, $listenerId, $listenerPath)
+                    }
+                }
+
+                $tcpOpen = $false
+                $probeClient = [System.Net.Sockets.TcpClient]::new()
+                try {
+                    $connect = $probeClient.BeginConnect($probeHost, $Port, $null, $null)
+                    if ($connect.AsyncWaitHandle.WaitOne(400) -and $probeClient.Connected) {
+                        $probeClient.EndConnect($connect)
+                        $tcpOpen = $true
+                    }
+                } catch {
+                    $tcpOpen = $false
+                } finally {
+                    $probeClient.Close()
+                }
+                if ($tcpOpen -and $matchingListenerPids.Count -eq 0) {
+                    throw ('Port {0} on {1} is occupied, but its listener could not be verified as this NInfer server. No process was stopped or started.' -f $Port, $probeHost)
+                }
+
+                $sameServerPresent = ($matchingProcesses.Count -gt 0 -or $matchingListenerPids.Count -gt 0)
+                if ($probeHealthy -and $probeIds.Count -gt 0 -and $sameServerPresent -and
+                    $probeIds -notcontains $modelAlias) {
+                    throw ('NInfer is healthy at {0}, but serves [{1}] instead of expected alias {2}. No process was stopped.' -f
+                        $baseUri, ($probeIds -join ', '), $modelAlias)
+                }
+
+                if (-not $sameServerPresent) {
+                    if (-not $mutexOwned) {
+                        try { $mutexOwned = $launcherMutex.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $mutexOwned = $true }
+                    }
+                    if ($mutexOwned) {
+                        # Recheck after acquiring the lock so simultaneous launchers cannot both start a model.
+                        $lockProbe = Get-NInferServiceProbe -ServiceUri $baseUri -ProbeApiKey $ApiKey
+                        $probeAfterLock = $lockProbe.HealthOk -and (@($lockProbe.ModelIds) -contains $modelAlias)
+                        if (-not $probeAfterLock) {
+                            $nativeListenerPresent = $false
+                            $lockedListeners = @(Get-ListenersOnPort $Port | Where-Object {
+                                (Get-SelectedListenAddresses $listenArgument) -contains ([string]$_.LocalAddress).Trim([char[]]@('[', ']'))
+                            })
+                            foreach ($listener in $lockedListeners) {
+                                $listenerId = [int]$listener.OwningProcess
+                                try {
+                                    $listenerProcess = Get-Process -Id $listenerId -ErrorAction Stop
+                                    if (-not $listenerProcess.Path) { throw 'process path unavailable' }
+                                    $listenerPath = [System.IO.Path]::GetFullPath($listenerProcess.Path)
+                                } catch {
+                                    throw ('Cannot verify PID {0} on port {1}; no process was stopped or started.' -f $listenerId, $Port)
+                                }
+                                if ($listenerPath -ine $serverExe) {
+                                    throw ('Port {0} on {1} is occupied by PID {2} ({3}), not the NInfer server executable. No process was stopped or started.' -f
+                                        $Port, $probeHost, $listenerId, $listenerPath)
+                                }
+                                $nativeListenerPresent = $true
+                            }
+                            $lockedTcpOpen = $false
+                            $lockedClient = [System.Net.Sockets.TcpClient]::new()
+                            try {
+                                $lockedConnect = $lockedClient.BeginConnect($probeHost, $Port, $null, $null)
+                                if ($lockedConnect.AsyncWaitHandle.WaitOne(400) -and $lockedClient.Connected) {
+                                    $lockedClient.EndConnect($lockedConnect)
+                                    $lockedTcpOpen = $true
+                                }
+                            } catch {
+                                $lockedTcpOpen = $false
+                            } finally {
+                                $lockedClient.Close()
+                            }
+                            if ($lockedTcpOpen -and -not $nativeListenerPresent) {
+                                throw ('Port {0} on {1} is occupied, but its listener could not be verified as this NInfer server. No process was stopped or started.' -f $Port, $probeHost)
+                            }
+                            $stillRunning = @(Get-NInferProcessesForPort -ExecutablePath $serverExe -LocalPort $Port)
+                            if ($stillRunning.Count -eq 0 -and -not $nativeListenerPresent) {
+                                $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+                                $startInfo.FileName = $serverExe
+                                $startInfo.WorkingDirectory = $repoRoot
+                                $startInfo.UseShellExecute = $false
+                                $startInfo.CreateNoWindow = $false
+                                $startInfo.RedirectStandardOutput = $false
+                                $startInfo.RedirectStandardError = $false
+                                $quotedArguments = foreach ($argument in $serverArgs) {
+                                    $value = [string]$argument
+                                    $builder = [System.Text.StringBuilder]::new()
+                                    [void]$builder.Append('"')
+                                    $slashes = 0
+                                    foreach ($character in $value.ToCharArray()) {
+                                        if ($character -eq [char]92) {
+                                            $slashes++
+                                        } elseif ($character -eq [char]34) {
+                                            [void]$builder.Append([string]::new([char]92, (2 * $slashes + 1)))
+                                            [void]$builder.Append('"')
+                                            $slashes = 0
+                                        } else {
+                                            if ($slashes -gt 0) { [void]$builder.Append([string]::new([char]92, $slashes)) }
+                                            [void]$builder.Append($character)
+                                            $slashes = 0
+                                        }
+                                    }
+                                    if ($slashes -gt 0) { [void]$builder.Append([string]::new([char]92, (2 * $slashes))) }
+                                    [void]$builder.Append('"')
+                                    $builder.ToString()
+                                }
+                                $startInfo.Arguments = [string]::Join(' ', [string[]]$quotedArguments)
+                                $startedServerProcess = [System.Diagnostics.Process]::new()
+                                $startedServerProcess.StartInfo = $startInfo
+                                if (-not $startedServerProcess.Start()) { throw 'Could not start the NInfer server process.' }
+                                Write-Host ('Started NInfer server PID {0}; waiting up to {1} seconds for /health and model alias {2}.' -f
+                                    $startedServerProcess.Id, $ReadyTimeoutSeconds, $modelAlias)
+                            }
+                        } else {
+                            # The service became ready during the lock handoff; the next pass opens chat.
+                            $mutexOwned = $true
+                        }
+                    }
+                }
+
+                if ([DateTime]::UtcNow -ge $readyDeadline) {
+                    throw ('Timed out after {0} seconds waiting for NInfer health and model alias {1} at {2}.' -f
+                        $ReadyTimeoutSeconds, $modelAlias, $baseUri)
+                }
+                if ($startedServerProcess -and $startedServerProcess.HasExited) {
+                    throw "NInfer server exited with code $($startedServerProcess.ExitCode) before becoming ready."
+                }
+                Start-Sleep -Milliseconds 1000
+            }
+        } finally {
+            if ($startedServerProcess) {
+                try {
+                    if (-not $startedServerProcess.HasExited) {
+                        $startedServerProcess.Kill()
+                        $startedServerProcess.WaitForExit(5000) | Out-Null
+                    }
+                } catch {
+                    Write-Warning ('Could not stop launcher-owned NInfer PID {0}: {1}' -f $startedServerProcess.Id, $_.Exception.Message)
+                }
+                $startedServerProcess.Dispose()
+            }
+            if ($mutexOwned) { $launcherMutex.ReleaseMutex() }
+            $launcherMutex.Dispose()
+        }
+    }
     & $serverExe @serverArgs
     if ($LASTEXITCODE -ne 0) {
         throw "NInfer server exited with code $LASTEXITCODE."

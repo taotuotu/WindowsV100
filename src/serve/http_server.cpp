@@ -12,9 +12,12 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <exception>
 #include <filesystem>
+#include <iterator>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -257,6 +260,9 @@ HttpServer::HttpServer(ServeOptions options, std::shared_ptr<spdlog::logger> log
                                                             options_.response_store_max_bytes),
       operational_log_(logger),
       request_jsonl_(options_.request_log_jsonl, options_.artifact_path, std::move(logger)) {
+#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+    ui_server_instance_id_ = "serve-ui-" + new_openai_request_id();
+#endif
     const std::size_t queued_requests =
         static_cast<std::size_t>(options_.max_concurrency) + options_.max_pending_requests;
     const std::size_t worker_count = queued_requests + 1;
@@ -294,24 +300,145 @@ std::shared_ptr<HttpServer::RequestLifecycle> HttpServer::begin_request(RequestL
     return std::make_shared<RequestLifecycle>(*this, std::move(context));
 }
 
+#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+std::uint64_t HttpServer::ui_uptime_ms() const noexcept {
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - ui_server_started_at_);
+    return static_cast<std::uint64_t>(std::max<std::int64_t>(elapsed.count(), 0));
+}
+
+void HttpServer::trim_ui_request_history_locked() {
+    while (ui_recent_requests_.size() > kUiRecentRequestLimit) {
+        const auto newest = std::prev(ui_recent_requests_.end());
+        const auto oldest_terminal = std::find_if(
+            ui_recent_requests_.begin(), newest,
+            [](const UiRecentRequest& request) { return request.status != "running"; });
+        if (oldest_terminal != newest) {
+            ui_recent_requests_.erase(oldest_terminal);
+        } else {
+            ui_recent_requests_.pop_front();
+        }
+    }
+}
+#endif
+
 void HttpServer::record_request_start(const RequestLogContext& context) {
+#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+    {
+        std::lock_guard lock(ui_metrics_mutex_);
+        ++ui_requests_started_;
+        UiRecentRequest request;
+        request.id             = context.id;
+        request.protocol       = context.protocol;
+        request.status         = "running";
+        request.started_at_ms  = ui_uptime_ms();
+        ui_recent_requests_.push_back(std::move(request));
+        trim_ui_request_history_locked();
+    }
+#endif
     request_jsonl_.write_request_start(context);
     operational_log_.request_start(context);
 }
 
 void HttpServer::record_request_rejected(const RequestRejectionLogContext& context) {
+#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+    {
+        std::lock_guard lock(ui_metrics_mutex_);
+        ++ui_requests_started_;
+        ++ui_requests_rejected_;
+        const std::uint64_t now = ui_uptime_ms();
+        UiRecentRequest request;
+        request.id             = context.id;
+        request.protocol       = context.protocol;
+        request.status         = "rejected";
+        request.finished_at_ms = now;
+        ui_recent_requests_.push_back(std::move(request));
+        trim_ui_request_history_locked();
+    }
+#endif
     request_jsonl_.write_request_rejected(context);
     operational_log_.request_rejected(context);
 }
 
 void HttpServer::record_request_done(const RequestLogContext& context,
                                      const GenerationOutcome& outcome) {
+#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+    const int prompt_tokens     = std::max(0, outcome.prompt_tokens);
+    const int completion_tokens = std::max(0, outcome.completion_tokens);
+    const std::uint64_t cached_tokens = std::min<std::uint64_t>(
+        outcome.metrics.prefix_cache_hit_tokens, static_cast<std::uint64_t>(prompt_tokens));
+    const int computed_prefill_tokens =
+        prompt_tokens - static_cast<int>(cached_tokens);
+    const auto measured_ms = [](double seconds) -> std::optional<double> {
+        if (!std::isfinite(seconds) || seconds < 0.0) { return std::nullopt; }
+        return seconds * 1000.0;
+    };
+    const auto measured_rate = [](double tokens, double seconds) -> std::optional<double> {
+        if (!std::isfinite(seconds) || seconds <= 0.0) { return std::nullopt; }
+        const double rate = tokens / seconds;
+        return std::isfinite(rate) && rate >= 0.0 ? std::optional<double>(rate) : std::nullopt;
+    };
+    const std::optional<double> decode_tok_s = measured_rate(
+        static_cast<double>(completion_tokens > 0 ? completion_tokens - 1 : 0),
+        outcome.metrics.generation_wall_seconds);
+    const std::optional<double> prefill_tok_s = measured_rate(
+        static_cast<double>(computed_prefill_tokens), outcome.metrics.prompt_wall_seconds);
+    const std::uint64_t finished_at_ms = ui_uptime_ms();
+    {
+        std::lock_guard lock(ui_metrics_mutex_);
+        ++ui_requests_completed_;
+        ui_cached_prompt_tokens_ += cached_tokens;
+        const auto request = std::find_if(
+            ui_recent_requests_.begin(), ui_recent_requests_.end(),
+            [&context](const UiRecentRequest& candidate) { return candidate.id == context.id; });
+        UiRecentRequest terminal_request;
+        terminal_request.id               = context.id;
+        terminal_request.protocol         = context.protocol;
+        terminal_request.status           = "completed";
+        terminal_request.prompt_tokens    = prompt_tokens;
+        terminal_request.completion_tokens = completion_tokens;
+        terminal_request.cached_tokens    = cached_tokens;
+        terminal_request.ttft_ms          = measured_ms(outcome.metrics.ttft_seconds);
+        terminal_request.total_ms         = measured_ms(outcome.metrics.total_seconds);
+        terminal_request.decode_tok_s     = decode_tok_s;
+        terminal_request.prefill_tok_s    = prefill_tok_s;
+        terminal_request.finished_at_ms  = finished_at_ms;
+        if (request != ui_recent_requests_.end()) {
+            terminal_request.started_at_ms = request->started_at_ms;
+            *request = std::move(terminal_request);
+        } else {
+            ui_recent_requests_.push_back(std::move(terminal_request));
+            trim_ui_request_history_locked();
+        }
+    }
+#endif
     request_jsonl_.write_request_done(context, outcome);
     operational_log_.request_done(context, outcome);
 }
 
 void HttpServer::record_request_failure(const RequestLogContext& context,
                                         const RequestFailure& failure) {
+#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+    {
+        std::lock_guard lock(ui_metrics_mutex_);
+        ++ui_requests_failed_;
+        const auto request = std::find_if(
+            ui_recent_requests_.begin(), ui_recent_requests_.end(),
+            [&context](const UiRecentRequest& candidate) { return candidate.id == context.id; });
+        if (request != ui_recent_requests_.end()) {
+            request->status          = "failed";
+            request->finished_at_ms = ui_uptime_ms();
+        } else {
+            UiRecentRequest terminal_request;
+            terminal_request.id             = context.id;
+            terminal_request.protocol       = context.protocol;
+            terminal_request.status         = "failed";
+            terminal_request.finished_at_ms = ui_uptime_ms();
+            ui_recent_requests_.push_back(std::move(terminal_request));
+            trim_ui_request_history_locked();
+        }
+    }
+#endif
     request_jsonl_.write_request_error(context, failure.machine_message);
     operational_log_.request_failure(context, failure);
 }
@@ -509,6 +636,9 @@ void HttpServer::register_routes() {
         res.set_header("Cache-Control", "no-store");
         res.set_content(info.dump(), "application/json");
     });
+    server_.Get("/ui/metrics", [this](const httplib::Request& req, httplib::Response& res) {
+        handle_ui_metrics(req, res);
+    });
 #endif
     server_.Get("/v1/models", [this](const httplib::Request& req, httplib::Response& res) {
         handle_models(req, res);
@@ -576,6 +706,89 @@ void HttpServer::handle_model(const httplib::Request& req, httplib::Response& re
                     "application/json");
 }
 
+#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+void HttpServer::handle_ui_metrics(const httplib::Request&, httplib::Response& res) const {
+    using Json = nlohmann::json;
+
+    const bool attached = service_ != nullptr;
+    const bool available = attached && service_->is_available();
+    const ninfer::RuntimeStats runtime = attached ? service_->runtime_stats()
+                                                  : ninfer::RuntimeStats{};
+
+    std::uint64_t decode_baseline = 0;
+    std::uint64_t prefill_baseline = 0;
+    std::uint64_t requests_started = 0;
+    std::uint64_t requests_completed = 0;
+    std::uint64_t requests_failed = 0;
+    std::uint64_t requests_rejected = 0;
+    std::uint64_t cached_prompt_tokens = 0;
+    std::deque<UiRecentRequest> recent_requests;
+    {
+        std::lock_guard lock(ui_metrics_mutex_);
+        decode_baseline       = ui_runtime_decode_baseline_;
+        prefill_baseline      = ui_runtime_prefill_baseline_;
+        requests_started      = ui_requests_started_;
+        requests_completed    = ui_requests_completed_;
+        requests_failed       = ui_requests_failed_;
+        requests_rejected     = ui_requests_rejected_;
+        cached_prompt_tokens  = ui_cached_prompt_tokens_;
+        recent_requests       = ui_recent_requests_;
+    }
+
+    const auto counter_delta = [](std::uint64_t current, std::uint64_t baseline) {
+        return current >= baseline ? current - baseline : std::uint64_t{0};
+    };
+    const auto optional_json = [](const auto& value) -> Json {
+        return value ? Json(*value) : Json(nullptr);
+    };
+    Json recent = Json::array();
+    for (const UiRecentRequest& request : recent_requests) {
+        recent.push_back(Json{
+            {"id", request.id},
+            {"protocol", request.protocol},
+            {"status", request.status},
+            {"prompt_tokens", optional_json(request.prompt_tokens)},
+            {"completion_tokens", optional_json(request.completion_tokens)},
+            {"cached_tokens", optional_json(request.cached_tokens)},
+            {"ttft_ms", optional_json(request.ttft_ms)},
+            {"total_ms", optional_json(request.total_ms)},
+            {"decode_tok_s", optional_json(request.decode_tok_s)},
+            {"prefill_tok_s", optional_json(request.prefill_tok_s)},
+            {"started_at_ms", optional_json(request.started_at_ms)},
+            {"finished_at_ms", optional_json(request.finished_at_ms)},
+        });
+    }
+
+    const Json response{
+        {"schema_version", 1},
+        {"server_instance_id", ui_server_instance_id_},
+        {"uptime_ms", ui_uptime_ms()},
+        {"available", available},
+        {"totals",
+         Json{{"committed_decode_tokens",
+               counter_delta(runtime.committed_decode_tokens, decode_baseline)},
+              {"computed_prefill_tokens",
+               counter_delta(runtime.computed_prefill_tokens, prefill_baseline)},
+              {"requests_started", requests_started},
+              {"requests_completed", requests_completed},
+              {"requests_failed", requests_failed},
+              {"requests_rejected", requests_rejected},
+              {"cached_prompt_tokens", cached_prompt_tokens}}},
+        {"scheduler",
+         Json{{"running", runtime.running_requests},
+              {"waiting", runtime.waiting_requests},
+              {"prefilling", runtime.prefilling_requests},
+              {"decode_ready", runtime.decode_ready_requests},
+              {"materializing", runtime.materializing_requests}}},
+        {"recent_requests", std::move(recent)},
+    };
+
+    res.status = available ? 200 : 503;
+    res.set_header("Cache-Control", "no-store");
+    res.set_content(response.dump(), "application/json");
+}
+#endif
+
 bool HttpServer::bind() { return server_.bind_to_port(options_.host, options_.port); }
 
 void HttpServer::attach(GenerationService& service) {
@@ -584,6 +797,14 @@ void HttpServer::attach(GenerationService& service) {
     }
     const ninfer::LoadSummary load = service.load_summary();
     public_model_id_               = resolve_public_model_id(options_, load.model_id);
+#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+    const ninfer::RuntimeStats ui_baseline = service.runtime_stats();
+    {
+        std::lock_guard lock(ui_metrics_mutex_);
+        ui_runtime_decode_baseline_  = ui_baseline.committed_decode_tokens;
+        ui_runtime_prefill_baseline_ = ui_baseline.computed_prefill_tokens;
+    }
+#endif
     service_                       = &service;
     request_jsonl_.write_server_start(options_, service.engine_options(),
                                       service.sampling_defaults(), public_model_id_, load,

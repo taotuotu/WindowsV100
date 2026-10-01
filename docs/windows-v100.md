@@ -36,7 +36,11 @@ identity: qwen3.8-27b / nvfp4, container v2
 
 ## 3. 启动和配置
 
-双击 `start-ninfer.bat`。启动器先找程序包的 `bin/ninfer-windows-serve.exe`，再找源码构建的 Release 程序。终端显示加载与预热进度，随后监听 `127.0.0.1:8110`。Ctrl+C 退出；`stop-ninfer.bat` 只停止端口和程序路径均匹配的实例。
+双击 `start-ninfer.bat`，一次完成模型启动、就绪等待和打开浏览器。它先找源码构建的 Release 程序，再找程序包的 `bin/ninfer-windows-serve.exe`；等待 `/health` 和预期模型列表可用后才打开聊天页。首次初始化可能需要几分钟，默认等待上限600秒，可用 `-ReadyTimeoutSeconds` 调整。
+
+已经健康运行的同一程序直接复用；同一程序正在初始化时等待，不重新加载模型。其它程序占用端口会显示错误。新服务在当前启动窗口中运行，Ctrl+C 或关闭窗口停止本次启动的服务；复用已有服务时不取得其进程所有权。失败会暂停保留报错，浏览器关联失败则显示可复制的聊天地址。`stop-ninfer.bat` 只停止端口和程序路径均匹配的实例。
+
+脚本 `run-ninfer-server.ps1 -OpenChat` 启用上述一键模式；不带该开关时维持纯 API 服务入口。一键模式的模型、地址、端口与密钥应使用脚本的 `-Model/-ListenHost/-Port/-ApiKey` 参数，避免原生额外参数覆盖探测目标。额外的 `--model-id` 会被用于预期别名探测。
 
 | 设置 | 公共默认 |
 |---|---|
@@ -78,7 +82,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-ninfer-server.
 
 ## 4. 网页和 API
 
-双击 `open-chat.bat`，默认打开 **http://127.0.0.1:8110/**。页面从 `GET /ui/model-info` 读取实际模型 ID、artifact basename、KV、MTP 档位、容量和设备；未知信息显示未获取。网页源代码构建时嵌入 EXE，运行不需要 CDN、npm 或额外静态文件。
+一键入口 `start-ninfer.bat` 会在就绪后打开 **http://127.0.0.1:8110/**。已有服务也可直接访问此地址。页面从 `GET /ui/model-info` 读取实际模型 ID、artifact basename、KV、MTP 档位、容量和设备；未知信息显示未获取。网页源代码构建时嵌入 EXE，运行不需要 CDN、npm 或额外静态文件。
 
 多轮聊天与 API key 仅在页面内存里；刷新清空。停止生成保留已经收到的文本。输出作为文本呈现。
 
@@ -103,6 +107,19 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-ninfer-server.
 - 输出 token 数、缓存命中、prefill 进度与速率取服务端字段，不按字符猜 token。
 - 网页首字是发请求至首个正文/思考 delta 的时间，包括网络和排队；与服务端单独阶段时间不同。
 - 计时字段缺失显示 `—`。
+
+### 全局速度面板
+
+顶部“全局速度”覆盖所有进入生成流程的 OpenAI Chat Completions、Responses、Anthropic Messages 请求，包括流式与非流式调用。它通过 `GET /ui/metrics` 每秒左右获取全局快照；配置 API key 时沿用页面当前密钥。无需开启请求 JSONL，也无需让其它客户端修改发送参数。
+
+- 实时解码与 prefill：相邻快照的引擎已提交解码/实际计算输入 token 增量，除以服务端单调时间增量；包含所有请求，空闲时为0。解码计数不含 prefill 产生的首输出 token。
+- 调度器：运行中、排队、预填充、解码就绪及准备上下文数量。
+- 累计解码与缓存命中：当前进程内统计，启动预热不计入解码/prefill累计量；缓存命中累计自已完成生成请求。
+- 最近请求：后端最多32条匿名记录，页面展示最近10条；包含协议、状态、输入/缓存/输出计数，以及完成后的解码平均速率。运行中尚未确定的字段显示 `—`。
+- 最新完成请求：平均解码沿用 SSE `(completion_tokens-1)/generation_wall_seconds`；TTFT为服务端请求阶段口径，与网页网络首字时间不同。
+- 图表：最多90个采样点。首次采样、重新连接、服务重启或页面恢复后先建立基准；缺失统计显示 `—`。页面隐藏时暂停，API key改变时重新连接。
+
+计数对象是进入生成 prepare 的请求尝试，包含 prepare 拒绝；鉴权/JSON解析错误和面板轮询不是生成任务。表格不包含提示、输出正文、密钥、客户端地址。统计仅保存在服务内存中，重启重置；协议名不等于某个客户端应用名。
 
 ### 客户端每轮发送完整历史
 

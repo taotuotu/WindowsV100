@@ -10,7 +10,7 @@
 - **显卡：V100 32GB / 同类 SM70 Volta 32GB。** 当前 Windows 构建面向 `sm_70`；不提供 RTX 显卡兼容承诺。
 - **模型：固定的 Qwen3.8-27B mixed NVFP4/FP8 `.ninfer` v2**，约 23.72 GB。下载器固定 revision、大小和 SHA256；权重不随源码或程序 ZIP 分发。
 - **输入：文本与工具历史。** 常驻服务提供 OpenAI Chat Completions / Responses、Anthropic Messages 和流式输出；Windows 构建关闭图像、视频输入。
-- **网页：** 多轮聊天、思考折叠、停止生成、完整模型标识、decode tok/s、首字延迟和缓存命中。
+- **网页：** 多轮聊天、思考折叠、停止生成、完整模型标识、decode tok/s、首字延迟和缓存命中；全局速度面板同时监控其它平台的 API 生成调用。
 - **KV：** BF16 / INT8 / FP8；默认 BF16。MTP 默认 learned window 3、optimized proposal head，前缀复用默认开启。
 
 此程序加载显式注册的 `.ninfer` artifact。GGUF 和任意 Q2/Q3/Q4/Q5/Q6 文件不能直接使用；其它模型的上游注册情况不等于本 Windows 发行版已经测过。
@@ -26,7 +26,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\download-model.ps1
 .\start-ninfer.bat
 ```
 
-看到服务监听后，双击 `open-chat.bat`，或打开 **http://127.0.0.1:8110/**。启动窗口保持运行，Ctrl+C 停止；`stop-ninfer.bat` 也可停止匹配的实例。页面聊天只保存在内存里，刷新会清空。
+`start-ninfer.bat` 是一键入口：启动模型，等待健康状态和模型列表就绪，再自动打开 **http://127.0.0.1:8110/**。首次初始化可能需要几分钟，默认等待上限10分钟。已运行的同一服务会被复用；本次新启动的服务由启动窗口持有，Ctrl+C 或关闭窗口停止它。启动失败会保留报错窗口；`stop-ninfer.bat` 可停止匹配的实例。页面聊天只保存在内存里，刷新会清空。
+
+页面的“全局速度”每秒左右刷新，包含网页、ZCode 和其它平台的生成调用：服务总解码/预填充吞吐、运行/排队状态、累计解码和缓存命中、最近请求与速率趋势。实时吞吐是相邻服务快照之间的真实 token 增量/耗时，与单次回答的解码阶段平均速率分开显示；解码计数不含预填充产生的首 token。请求记录只有匿名计时与计数，服务重启后重置。
 
 源码用户先安装 Visual Studio 2022 的 C++ / Windows SDK 组件、CUDA Toolkit **12.9** 和 CMake 3.28+，再构建：
 

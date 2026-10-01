@@ -548,8 +548,8 @@ if(NINFER_BUILD_SERVE)
     PRIVATE ninfer_media_acquire ninfer_product_logging CUDA::cudart)
   if(WIN32 AND NINFER_BUILD_WINDOWS_SERVE)
     target_compile_definitions(ninfer_serve
-      PRIVATE NINFER_WINDOWS_TEXT_ONLY_SERVE=1
-      PUBLIC _WIN32_WINNT=0x0A00 NOMINMAX WIN32_LEAN_AND_MEAN)
+      PUBLIC NINFER_WINDOWS_TEXT_ONLY_SERVE=1
+      _WIN32_WINNT=0x0A00 NOMINMAX WIN32_LEAN_AND_MEAN)
   endif()
   if(WIN32)
     target_link_libraries(ninfer_serve PRIVATE ws2_32)

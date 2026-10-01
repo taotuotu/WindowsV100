@@ -21,6 +21,29 @@ reports the resident Engine's canonical model/weights IDs, artifact basename, KV
 speculation, context capacity, device ordinal, and prefix-reuse setting. It does not change the
 OpenAI public model alias or `/v1/models` schema and returns 503 when the service is unavailable.
 
+`GET /ui/metrics` is the Windows UI global speed endpoint under the same API-key policy. Schema
+version 1 returns a process-specific `server_instance_id`, monotonic `uptime_ms`, `available`,
+Engine token totals (excluding startup warmup), scheduler gauges, generation-attempt counters,
+and at most 32 anonymous recent request records. It covers the shared lifecycle of OpenAI Chat,
+Responses and Anthropic generation, whether streaming or aggregate, independently of JSONL
+logging. A request enters these counters at generation preparation; authentication/JSON-parse
+failures and monitoring polls are not generation attempts. Counter/history updates use short
+locks; querying published RuntimeStats does not synchronize GPU work. Unavailable service
+returns 503 with `available:false` and the same schema. No prompt, generated text, API key,
+client address or full artifact path is exposed.
+
+The browser computes aggregate decode/prefill throughput from token-counter changes divided by
+the server uptime change between snapshots. This recent-window total is distinct from a completed
+request's SSE decode-phase average `(completion_tokens-1)/generation_wall_seconds`. Completed
+request prefill averages retain the SSE `prompt_wall_seconds` boundary. Counters/history reset
+with the service process; a client must establish a new baseline when the instance changes.
+The decode counter excludes the first output token produced during prefill; completed-request
+`completion_tokens` retains the full request output count.
+
+The Windows `start-ninfer.bat` launcher starts or reuses the selected native service, waits for
+health/model discovery, then opens the chat and global monitor page. The direct PowerShell
+script retains API-only behavior unless passed `-OpenChat`.
+
 ## Start the server
 
 ```bash

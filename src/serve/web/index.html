@@ -96,6 +96,78 @@
     .model-meta-specs { display: flex; flex-wrap: wrap; gap: 4px 15px; color: var(--soft); font-size: 11px; line-height: 1.6; }
     .model-meta-chip { overflow-wrap: anywhere; }
 
+    .global-metrics {
+      margin-top: 12px;
+      border: 1px solid rgba(155, 174, 168, .15);
+      border-radius: 15px;
+      background: rgba(255, 255, 255, .025);
+    }
+    .global-metrics details { min-width: 0; }
+    .global-metrics summary {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      min-height: 52px;
+      padding: 10px 14px;
+      cursor: pointer;
+      list-style: none;
+    }
+    .global-metrics summary::-webkit-details-marker { display: none; }
+    .global-metrics summary::after { color: var(--muted); content: "⌄"; font-size: 17px; }
+    .global-metrics details[open] > summary::after { content: "⌃"; }
+    .global-metrics-title { min-width: 0; }
+    .global-metrics-title strong { display: block; font-size: 13px; font-weight: 650; }
+    .global-metrics-title small { display: block; margin-top: 3px; color: var(--muted); font-size: 10px; line-height: 1.4; }
+    .global-metrics-state {
+      flex: 0 0 auto;
+      max-width: 45%;
+      overflow: hidden;
+      color: var(--muted);
+      font-size: 10px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .global-metrics-state[data-state="online"] { color: var(--accent); }
+    .global-metrics-state[data-state="busy"] { color: var(--warning); }
+    .global-metrics-state[data-state="offline"] { color: var(--danger); }
+    .global-metrics-body { padding: 0 14px 14px; }
+    .global-metrics-note { margin: 0 0 10px; color: var(--muted); font-size: 10px; line-height: 1.5; }
+    .global-metrics-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+    .global-metrics-card {
+      min-width: 0;
+      padding: 9px 10px;
+      border: 1px solid rgba(155, 174, 168, .11);
+      border-radius: 11px;
+      background: rgba(255, 255, 255, .018);
+    }
+    .global-metrics-label { display: block; color: var(--muted); font-size: 10px; line-height: 1.4; }
+    .global-metrics-value { display: block; margin-top: 4px; color: var(--accent); font-size: 16px; font-variant-numeric: tabular-nums; font-weight: 650; white-space: nowrap; }
+    .global-metrics-subvalue { display: block; margin-top: 5px; color: var(--soft); font-size: 10px; line-height: 1.5; font-variant-numeric: tabular-nums; }
+    .global-metrics-activity { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; margin-top: 7px; }
+    .global-metrics-activity span { min-width: 0; color: var(--muted); font-size: 9px; line-height: 1.4; }
+    .global-metrics-activity strong { display: block; margin-top: 2px; color: var(--soft); font-size: 13px; font-variant-numeric: tabular-nums; }
+    .global-metrics-chart { margin-top: 9px; padding: 9px 10px 7px; border: 1px solid rgba(155, 174, 168, .11); border-radius: 11px; background: rgba(255, 255, 255, .018); }
+    .global-metrics-chart-head { display: flex; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 10px; }
+    .global-metrics-chart svg { display: block; width: 100%; height: 76px; margin-top: 5px; overflow: visible; }
+    .global-metrics-chart-grid { stroke: rgba(155, 174, 168, .16); stroke-width: 1; }
+    .global-metrics-chart-output { fill: none; stroke: #a7d8c0; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+    .global-metrics-chart-prefill { fill: none; stroke: #8fb4d2; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; stroke-dasharray: 4 3; }
+    .global-metrics-chart-empty { fill: #98a5a3; font-size: 10px; text-anchor: middle; }
+    .global-metrics-legend { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 2px; color: var(--muted); font-size: 9px; }
+    .global-metrics-legend span { display: inline-flex; align-items: center; gap: 5px; }
+    .global-metrics-legend i { display: inline-block; width: 13px; height: 2px; border-radius: 999px; background: var(--accent); }
+    .global-metrics-legend .prefill-key { background: #8fb4d2; }
+    .global-requests { margin-top: 10px; }
+    .global-requests-heading { margin: 0 0 6px; color: var(--soft); font-size: 11px; font-weight: 600; }
+    .global-requests-scroll { max-height: 206px; overflow: auto; border: 1px solid rgba(155, 174, 168, .11); border-radius: 10px; }
+    .global-requests table { width: 100%; min-width: 680px; border-collapse: collapse; font-size: 10px; font-variant-numeric: tabular-nums; }
+    .global-requests th, .global-requests td { padding: 7px 8px; border-bottom: 1px solid rgba(155, 174, 168, .08); text-align: left; white-space: nowrap; }
+    .global-requests th { position: sticky; top: 0; z-index: 1; color: var(--muted); background: #1b2123; font-weight: 550; }
+    .global-requests td { color: var(--soft); }
+    .global-requests tbody tr:last-child td { border-bottom: 0; }
+    .global-requests-empty { padding: 12px 9px; color: var(--muted); font-size: 10px; }
+
     .connection {
       display: inline-flex;
       align-items: center;
@@ -297,6 +369,13 @@
       .model-meta { gap: 4px; margin-top: 9px; padding: 10px 11px; }
       .model-meta-title { font-size: 13px; }
       .model-meta-specs { gap: 3px 11px; font-size: 10px; }
+      .global-metrics { margin-top: 9px; }
+      .global-metrics summary { min-height: 48px; padding: 9px 10px; }
+      .global-metrics-body { padding: 0 10px 10px; }
+      .global-metrics-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+      .global-metrics-card { padding: 8px; }
+      .global-metrics-chart svg { height: 68px; }
+      .global-requests-scroll { max-height: 190px; }
       .welcome { margin-top: 8vh; }
       .welcome h1 { font-size: 37px; }
       .welcome-copy { font-size: 14px; }
@@ -381,6 +460,78 @@
       </div>
     </section>
 
+    <section class="global-metrics" aria-label="全局推理速度监控">
+      <details id="global-metrics-details" open>
+        <summary>
+          <span class="global-metrics-title">
+            <strong>全局速度</strong>
+            <small>覆盖网页聊天、ZCode 与其他平台 API 调用</small>
+          </span>
+          <span id="global-metrics-state" class="global-metrics-state" data-state="busy" role="status">等待首次采样</span>
+        </summary>
+        <div class="global-metrics-body">
+          <p class="global-metrics-note">数据来自服务端全局统计。最近采样窗口的服务总吞吐，与单请求解码阶段平均不同。解码计数不含预填充产生的首 token。</p>
+          <div class="global-metrics-grid">
+            <div class="global-metrics-card">
+              <span class="global-metrics-label">服务总解码</span>
+              <strong id="global-output-rate" class="global-metrics-value">—</strong>
+              <span class="global-metrics-subvalue">最近采样窗口</span>
+            </div>
+            <div class="global-metrics-card">
+              <span class="global-metrics-label">服务总 Prefill</span>
+              <strong id="global-prefill-rate" class="global-metrics-value">—</strong>
+              <span class="global-metrics-subvalue">最近采样窗口</span>
+            </div>
+            <div class="global-metrics-card">
+              <span class="global-metrics-label">调度状态</span>
+              <div class="global-metrics-activity">
+                <span>运行中<strong id="global-running">—</strong></span>
+                <span>排队<strong id="global-waiting">—</strong></span>
+                <span>预填充<strong id="global-prefilling">—</strong></span>
+              </div>
+              <span id="global-scheduler-extra" class="global-metrics-subvalue">解码就绪 — · 准备上下文 —</span>
+            </div>
+            <div class="global-metrics-card">
+              <span class="global-metrics-label">累计解码 tokens</span>
+              <strong id="global-output-total" class="global-metrics-value">—</strong>
+              <span class="global-metrics-subvalue">服务进程启动以来</span>
+            </div>
+            <div class="global-metrics-card">
+              <span class="global-metrics-label">累计缓存命中</span>
+              <strong id="global-cache-total" class="global-metrics-value">—</strong>
+              <span class="global-metrics-subvalue">Prompt tokens</span>
+            </div>
+            <div class="global-metrics-card">
+              <span class="global-metrics-label">最新已完成请求 · 平均解码</span>
+              <strong id="global-latest-decode" class="global-metrics-value">—</strong>
+              <span id="global-latest-ttft" class="global-metrics-subvalue">TTFT —</span>
+            </div>
+          </div>
+          <div class="global-metrics-chart">
+            <div class="global-metrics-chart-head"><span>吞吐趋势</span><span id="global-chart-scale">90 点 · 范围 0–— tok/s</span></div>
+            <svg viewBox="0 0 540 76" preserveAspectRatio="none" role="img" aria-label="服务解码与预填充吞吐趋势">
+              <line class="global-metrics-chart-grid" x1="0" y1="10" x2="540" y2="10"></line>
+              <line class="global-metrics-chart-grid" x1="0" y1="38" x2="540" y2="38"></line>
+              <line class="global-metrics-chart-grid" x1="0" y1="66" x2="540" y2="66"></line>
+              <polyline id="global-output-line" class="global-metrics-chart-output" points=""></polyline>
+              <polyline id="global-prefill-line" class="global-metrics-chart-prefill" points=""></polyline>
+              <text id="global-chart-empty" class="global-metrics-chart-empty" x="270" y="43">等待有效采样</text>
+            </svg>
+            <div class="global-metrics-legend"><span><i></i>解码 tok/s</span><span><i class="prefill-key"></i>Prefill tok/s</span></div>
+          </div>
+          <div class="global-requests">
+            <h2 class="global-requests-heading">最近请求 · 最多显示 10 条</h2>
+            <div class="global-requests-scroll">
+              <table>
+                <thead><tr><th>ID</th><th>协议</th><th>状态</th><th>输入</th><th>缓存命中</th><th>输出</th><th>平均解码速率</th></tr></thead>
+                <tbody id="global-requests-body"><tr><td class="global-requests-empty" colspan="7">等待服务端统计</td></tr></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </details>
+    </section>
+
     <main id="messages" class="messages" aria-live="polite">
       <section id="welcome" class="welcome">
         <div class="welcome-kicker">本地模型 · 流式对话</div>
@@ -430,6 +581,7 @@
       const FALLBACK_API = "http://127.0.0.1:8110/v1";
       const apiBase = location.protocol === "file:" ? FALLBACK_API : `${location.origin}/v1`;
       const modelInfoUrl = `${apiBase.replace(/\/v1\/?$/, "")}/ui/model-info`;
+      const globalMetricsUrl = `${apiBase.replace(/\/v1\/?$/, "")}/ui/metrics`;
       const ui = {
         status: document.getElementById("connection-status"),
         endpoint: document.getElementById("api-endpoint"),
@@ -448,6 +600,22 @@
         modelMetaTitle: document.getElementById("model-meta-title"),
         modelMetaArtifact: document.getElementById("model-meta-artifact"),
         modelMetaSpecs: document.getElementById("model-meta-specs"),
+        globalMetricsState: document.getElementById("global-metrics-state"),
+        globalOutputRate: document.getElementById("global-output-rate"),
+        globalPrefillRate: document.getElementById("global-prefill-rate"),
+        globalRunning: document.getElementById("global-running"),
+        globalWaiting: document.getElementById("global-waiting"),
+        globalPrefilling: document.getElementById("global-prefilling"),
+        globalSchedulerExtra: document.getElementById("global-scheduler-extra"),
+        globalOutputTotal: document.getElementById("global-output-total"),
+        globalCacheTotal: document.getElementById("global-cache-total"),
+        globalLatestDecode: document.getElementById("global-latest-decode"),
+        globalLatestTtft: document.getElementById("global-latest-ttft"),
+        globalOutputLine: document.getElementById("global-output-line"),
+        globalPrefillLine: document.getElementById("global-prefill-line"),
+        globalChartEmpty: document.getElementById("global-chart-empty"),
+        globalChartScale: document.getElementById("global-chart-scale"),
+        globalRequestsBody: document.getElementById("global-requests-body"),
         welcome: document.getElementById("welcome"),
         conversation: document.getElementById("conversation"),
         alert: document.getElementById("global-alert")
@@ -457,6 +625,13 @@
       let activeRequest = null;
       let requestSerial = 0;
       let followTail = true;
+      let globalMetricsTimer = null;
+      let globalMetricsDebounceTimer = null;
+      let globalMetricsController = null;
+      let globalMetricsInFlight = false;
+      let globalMetricsRefreshPending = false;
+      let globalMetricsBaseline = null;
+      let globalMetricsHistory = [];
 
       ui.endpoint.textContent = apiBase;
 
@@ -489,6 +664,302 @@
         const key = ui.apiKey.value.trim();
         if (key) headers.Authorization = `Bearer ${key}`;
         return headers;
+      }
+
+      function setGlobalMetricsState(label, state) {
+        ui.globalMetricsState.textContent = label;
+        ui.globalMetricsState.dataset.state = state;
+      }
+
+      function metricNumber(value, integer = false) {
+        if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return null;
+        if (integer && (!Number.isSafeInteger(value) || value < 0)) return null;
+        return value;
+      }
+
+      function formatGlobalRate(value) {
+        return Number.isFinite(value) && value >= 0 ? `${value.toFixed(1)} tok/s` : "—";
+      }
+
+      function formatMetricTime(value) {
+        if (!Number.isFinite(value) || value < 0) return "—";
+        return value >= 1000 ? `${(value / 1000).toFixed(2)} s` : `${Math.round(value)} ms`;
+      }
+
+      function resetGlobalMetricsBaseline(clearTrend = true) {
+        globalMetricsBaseline = null;
+        ui.globalOutputRate.textContent = "—";
+        ui.globalPrefillRate.textContent = "—";
+        if (clearTrend) {
+          globalMetricsHistory = [];
+          renderGlobalMetricsTrend();
+        }
+      }
+
+      function clearGlobalMetricsSnapshot() {
+        resetGlobalMetricsBaseline(true);
+        ui.globalRunning.textContent = "—";
+        ui.globalWaiting.textContent = "—";
+        ui.globalPrefilling.textContent = "—";
+        ui.globalSchedulerExtra.textContent = "解码就绪 — · 准备上下文 —";
+        ui.globalOutputTotal.textContent = "—";
+        ui.globalCacheTotal.textContent = "—";
+        ui.globalLatestDecode.textContent = "—";
+        ui.globalLatestTtft.textContent = "TTFT —";
+        renderGlobalRequests([]);
+      }
+
+      function renderGlobalMetricsTrend() {
+        const points = globalMetricsHistory;
+        if (points.length === 0) {
+          ui.globalOutputLine.setAttribute("points", "");
+          ui.globalPrefillLine.setAttribute("points", "");
+          ui.globalChartScale.textContent = "90 点 · 范围 0–— tok/s";
+          ui.globalChartEmpty.hidden = false;
+          return;
+        }
+        const maximum = Math.max(1, ...points.flatMap(point => [point.output, point.prefill]));
+        ui.globalChartScale.textContent = `90 点 · 范围 0–${maximum.toLocaleString("zh-CN", { maximumFractionDigits: 1 })} tok/s`;
+        const makePoints = key => points.map((point, index) => {
+          const x = points.length < 2 ? 540 : index / (points.length - 1) * 540;
+          const y = 66 - point[key] / maximum * 56;
+          return `${x.toFixed(1)},${y.toFixed(1)}`;
+        }).join(" ");
+        ui.globalOutputLine.setAttribute("points", makePoints("output"));
+        ui.globalPrefillLine.setAttribute("points", makePoints("prefill"));
+        ui.globalChartEmpty.hidden = true;
+      }
+
+      function metadataText(value, limit = 64) {
+        if (typeof value === "string") return value.slice(0, limit) || "—";
+        if (typeof value === "number" && Number.isFinite(value)) return String(value).slice(0, limit);
+        return "—";
+      }
+
+      function protocolLabel(value) {
+        const labels = {
+          openai_chat_completions: "OpenAI 兼容对话",
+          openai_responses: "OpenAI Responses 协议",
+          anthropic_messages: "Anthropic Messages 协议"
+        };
+        if (typeof value !== "string" || !value) return "—";
+        return Object.prototype.hasOwnProperty.call(labels, value) ? labels[value] : metadataText(value, 40);
+      }
+
+      function requestStateLabel(value) {
+        const labels = {
+          running: "处理中",
+          queued: "排队中",
+          waiting: "等待中",
+          prefilling: "预填充",
+          completed: "已完成",
+          failed: "失败",
+          rejected: "已拒绝"
+        };
+        if (typeof value !== "string" || !value) return "—";
+        return Object.prototype.hasOwnProperty.call(labels, value) ? labels[value] : metadataText(value, 40);
+      }
+
+      function appendRequestCell(row, value) {
+        const cell = document.createElement("td");
+        cell.textContent = value;
+        row.append(cell);
+      }
+
+      function renderGlobalRequests(requests) {
+        ui.globalRequestsBody.replaceChildren();
+        const rows = Array.isArray(requests) ? requests.slice() : [];
+        rows.sort((left, right) => {
+          const leftTime = Math.max(metricNumber(left && left.started_at_ms) || 0, metricNumber(left && left.finished_at_ms) || 0);
+          const rightTime = Math.max(metricNumber(right && right.started_at_ms) || 0, metricNumber(right && right.finished_at_ms) || 0);
+          return rightTime - leftTime;
+        });
+        const visibleRows = rows.slice(0, 10);
+        if (visibleRows.length === 0) {
+          const row = document.createElement("tr");
+          const cell = document.createElement("td");
+          cell.className = "global-requests-empty";
+          cell.colSpan = 7;
+          cell.textContent = "暂无最近请求";
+          row.append(cell);
+          ui.globalRequestsBody.append(row);
+          ui.globalLatestDecode.textContent = "—";
+          ui.globalLatestTtft.textContent = "TTFT —";
+          return;
+        }
+        for (const request of visibleRows) {
+          const row = document.createElement("tr");
+          appendRequestCell(row, metadataText(request && request.id));
+          appendRequestCell(row, protocolLabel(request && request.protocol));
+          appendRequestCell(row, requestStateLabel(request && request.status));
+          const promptTokens = metricNumber(request && request.prompt_tokens, true);
+          const cachedTokens = metricNumber(request && request.cached_tokens, true);
+          const outputTokens = metricNumber(request && request.completion_tokens, true);
+          const decodeRate = metricNumber(request && request.decode_tok_s);
+          appendRequestCell(row, promptTokens === null ? "—" : formatCount(promptTokens));
+          appendRequestCell(row, cachedTokens === null ? "—" : formatCount(cachedTokens));
+          appendRequestCell(row, outputTokens === null ? "—" : formatCount(outputTokens));
+          appendRequestCell(row, formatGlobalRate(decodeRate));
+          ui.globalRequestsBody.append(row);
+        }
+        const completed = rows.filter(request => request && request.status === "completed");
+        completed.sort((left, right) => (metricNumber(right.finished_at_ms) || 0) - (metricNumber(left.finished_at_ms) || 0));
+        const latest = completed[0];
+        if (!latest) {
+          ui.globalLatestDecode.textContent = "—";
+          ui.globalLatestTtft.textContent = "TTFT —";
+          return;
+        }
+        ui.globalLatestDecode.textContent = formatGlobalRate(metricNumber(latest.decode_tok_s));
+        ui.globalLatestTtft.textContent = `TTFT ${formatMetricTime(metricNumber(latest.ttft_ms))}`;
+      }
+
+      function renderGlobalMetrics(payload) {
+        if (!payload || typeof payload !== "object" || Array.isArray(payload) || payload.schema_version !== 1) {
+          throw new Error("全局统计数据格式不受支持");
+        }
+        if (payload.available !== true) {
+          throw new Error("服务未提供全局统计");
+        }
+        const totals = payload.totals;
+        const scheduler = payload.scheduler;
+        const uptime = metricNumber(payload.uptime_ms);
+        const outputTotal = totals && metricNumber(totals.committed_decode_tokens, true);
+        const prefillTotal = totals && metricNumber(totals.computed_prefill_tokens, true);
+        if (!totals || uptime === null || outputTotal === null || prefillTotal === null ||
+            typeof payload.server_instance_id !== "string" || !payload.server_instance_id) {
+          throw new Error("全局统计数据缺少累计计数或服务标识");
+        }
+        const cachedTotal = metricNumber(totals.cached_prompt_tokens, true);
+        const now = performance.now();
+        const current = {
+          instance: payload.server_instance_id,
+          uptime,
+          output: outputTotal,
+          prefill: prefillTotal,
+          sampledAt: now
+        };
+        const previous = globalMetricsBaseline;
+        const wallElapsed = previous ? (now - previous.sampledAt) / 1000 : null;
+        const gapReset = previous && (!Number.isFinite(wallElapsed) || wallElapsed <= 0 || wallElapsed > 10);
+        const reset = !previous || current.instance !== previous.instance || current.uptime < previous.uptime || gapReset ||
+          current.output < previous.output || current.prefill < previous.prefill;
+        if (reset) {
+          ui.globalOutputRate.textContent = "—";
+          ui.globalPrefillRate.textContent = "—";
+          if (previous) {
+            globalMetricsHistory = [];
+            renderGlobalMetricsTrend();
+            setGlobalMetricsState(gapReset ? "采样间隔过长，重新建立基准" : "服务重启或计数重置，重新采样", "busy");
+          } else {
+            setGlobalMetricsState("已连接 · 建立采样基准", "busy");
+          }
+        } else {
+          const elapsed = (current.uptime - previous.uptime) / 1000;
+          if (elapsed > 0 && wallElapsed > 0) {
+            const outputRate = (current.output - previous.output) / elapsed;
+            const prefillRate = (current.prefill - previous.prefill) / elapsed;
+            ui.globalOutputRate.textContent = formatGlobalRate(outputRate);
+            ui.globalPrefillRate.textContent = formatGlobalRate(prefillRate);
+            globalMetricsHistory.push({ output: outputRate, prefill: prefillRate });
+            if (globalMetricsHistory.length > 90) globalMetricsHistory.shift();
+            renderGlobalMetricsTrend();
+          } else {
+            ui.globalOutputRate.textContent = "—";
+            ui.globalPrefillRate.textContent = "—";
+          }
+          setGlobalMetricsState("已连接 · 每秒采样", "online");
+        }
+        globalMetricsBaseline = current;
+        ui.globalOutputTotal.textContent = formatCount(outputTotal);
+        ui.globalCacheTotal.textContent = cachedTotal === null ? "—" : formatCount(cachedTotal);
+        const running = scheduler && metricNumber(scheduler.running, true);
+        const waiting = scheduler && metricNumber(scheduler.waiting, true);
+        const prefilling = scheduler && metricNumber(scheduler.prefilling, true);
+        const decodeReady = scheduler && metricNumber(scheduler.decode_ready, true);
+        const materializing = scheduler && metricNumber(scheduler.materializing, true);
+        ui.globalRunning.textContent = running === null ? "—" : formatCount(running);
+        ui.globalWaiting.textContent = waiting === null ? "—" : formatCount(waiting);
+        ui.globalPrefilling.textContent = prefilling === null ? "—" : formatCount(prefilling);
+        ui.globalSchedulerExtra.textContent = `解码就绪 ${decodeReady === null ? "—" : formatCount(decodeReady)} · 准备上下文 ${materializing === null ? "—" : formatCount(materializing)}`;
+        renderGlobalRequests(payload.recent_requests);
+      }
+
+      function scheduleGlobalMetricsPoll(delay = 1000) {
+        if (document.hidden) return;
+        if (globalMetricsTimer !== null) clearTimeout(globalMetricsTimer);
+        globalMetricsTimer = setTimeout(() => {
+          globalMetricsTimer = null;
+          pollGlobalMetrics();
+        }, delay);
+      }
+
+      function requestGlobalMetricsRefresh(resetBaseline = false, debounce = false) {
+        if (resetBaseline) resetGlobalMetricsBaseline(true);
+        globalMetricsRefreshPending = true;
+        if (globalMetricsTimer !== null) {
+          clearTimeout(globalMetricsTimer);
+          globalMetricsTimer = null;
+        }
+        if (globalMetricsController) globalMetricsController.abort();
+        if (globalMetricsDebounceTimer !== null) {
+          clearTimeout(globalMetricsDebounceTimer);
+          globalMetricsDebounceTimer = null;
+        }
+        if (debounce) {
+          globalMetricsDebounceTimer = setTimeout(() => {
+            globalMetricsDebounceTimer = null;
+            if (!globalMetricsInFlight && !document.hidden) {
+              globalMetricsRefreshPending = false;
+              scheduleGlobalMetricsPoll(0);
+            }
+          }, 300);
+        } else if (!globalMetricsInFlight && !document.hidden) {
+          globalMetricsRefreshPending = false;
+          scheduleGlobalMetricsPoll(0);
+        }
+      }
+
+      async function pollGlobalMetrics() {
+        if (globalMetricsInFlight || document.hidden) return;
+        globalMetricsInFlight = true;
+        const controller = new AbortController();
+        globalMetricsController = controller;
+        let timedOut = false;
+        const timeout = setTimeout(() => {
+          timedOut = true;
+          controller.abort();
+        }, 4000);
+        try {
+          const response = await fetch(globalMetricsUrl, { headers: requestHeaders(), signal: controller.signal });
+          if (!response.ok) {
+            if (response.status === 401) throw new Error("API Key 待填写或无效（HTTP 401）");
+            if (response.status === 503) throw new Error("服务未提供全局统计（HTTP 503）");
+            throw new Error(`全局统计未连接（HTTP ${response.status}）`);
+          }
+          const payload = await response.json();
+          renderGlobalMetrics(payload);
+        } catch (error) {
+          if (!document.hidden && (timedOut || !controller.signal.aborted)) {
+            clearGlobalMetricsSnapshot();
+            const message = timedOut
+              ? "全局统计请求超时"
+              : (error && error.message ? error.message : "全局统计未连接");
+            setGlobalMetricsState(message, "offline");
+          }
+        } finally {
+          clearTimeout(timeout);
+          if (globalMetricsController === controller) globalMetricsController = null;
+          globalMetricsInFlight = false;
+          if (!document.hidden) {
+            if (globalMetricsRefreshPending && globalMetricsDebounceTimer === null) {
+              globalMetricsRefreshPending = false;
+              scheduleGlobalMetricsPoll(0);
+            } else if (!globalMetricsRefreshPending) {
+              scheduleGlobalMetricsPoll(1000);
+            }
+          }
+        }
       }
 
       function describeHttpError(status, bodyText) {
@@ -635,6 +1106,7 @@
       }
 
       async function refreshServerInfo() {
+        requestGlobalMetricsRefresh(true);
         await loadModels();
         await loadModelInfo();
       }
@@ -1134,6 +1606,27 @@
       ui.refreshModels.addEventListener("click", () => {
         clearAlert();
         refreshServerInfo();
+      });
+      ui.apiKey.addEventListener("input", () => requestGlobalMetricsRefresh(true, true));
+      ui.model.addEventListener("change", () => requestGlobalMetricsRefresh(true));
+
+      document.addEventListener("visibilitychange", () => {
+        if (document.hidden) {
+          if (globalMetricsTimer !== null) {
+            clearTimeout(globalMetricsTimer);
+            globalMetricsTimer = null;
+          }
+          globalMetricsRefreshPending = false;
+          resetGlobalMetricsBaseline(true);
+          if (globalMetricsController) globalMetricsController.abort();
+        } else {
+          resetGlobalMetricsBaseline(true);
+          globalMetricsRefreshPending = true;
+          if (!globalMetricsInFlight) {
+            globalMetricsRefreshPending = false;
+            scheduleGlobalMetricsPoll(0);
+          }
+        }
       });
 
       document.querySelectorAll(".suggestion").forEach(button => {

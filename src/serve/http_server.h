@@ -1,3 +1,4 @@
+// Modified for the Windows/V100 port by taotuotu, 2026; see NOTICE.
 #pragma once
 
 #include "serve/generation_service.h"
@@ -9,11 +10,16 @@
 #include <httplib.h>
 
 #include <atomic>
-#include <condition_variable>
 #include <chrono>
+#include <condition_variable>
+#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+#include <cstddef>
+#include <deque>
+#include <optional>
+#endif
 #include <cstdint>
-#include <mutex>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -87,7 +93,6 @@ private:
     void handle_response_compact(const httplib::Request& req, httplib::Response& res);
     void handle_models(const httplib::Request& req, httplib::Response& res) const;
     void handle_model(const httplib::Request& req, httplib::Response& res) const;
-
     void record_request_start(const RequestLogContext& context);
     void record_request_rejected(const RequestRejectionLogContext& context);
     void record_request_done(const RequestLogContext& context, const GenerationOutcome& outcome);
@@ -96,6 +101,26 @@ private:
     void record_throughput(const ThroughputReport& report);
     void run_stats_reporter();
     void stop_stats_reporter();
+#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+    void handle_ui_metrics(const httplib::Request& req, httplib::Response& res) const;
+    [[nodiscard]] std::uint64_t ui_uptime_ms() const noexcept;
+    void trim_ui_request_history_locked();
+
+    struct UiRecentRequest {
+        std::uint64_t id = 0;
+        std::string protocol;
+        std::string status;
+        std::optional<int> prompt_tokens;
+        std::optional<int> completion_tokens;
+        std::optional<std::uint64_t> cached_tokens;
+        std::optional<double> ttft_ms;
+        std::optional<double> total_ms;
+        std::optional<double> decode_tok_s;
+        std::optional<double> prefill_tok_s;
+        std::optional<std::uint64_t> started_at_ms;
+        std::optional<std::uint64_t> finished_at_ms;
+    };
+#endif
 
     GenerationService* service_ = nullptr;
     ServeOptions options_;
@@ -109,6 +134,22 @@ private:
     std::condition_variable stats_cv_;
     std::thread stats_thread_;
     bool stats_stopping_ = false;
+
+#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+    static constexpr std::size_t kUiRecentRequestLimit = 32;
+    const std::chrono::steady_clock::time_point ui_server_started_at_ =
+        std::chrono::steady_clock::now();
+    std::string ui_server_instance_id_;
+    mutable std::mutex ui_metrics_mutex_;
+    std::deque<UiRecentRequest> ui_recent_requests_;
+    std::uint64_t ui_runtime_decode_baseline_ = 0;
+    std::uint64_t ui_runtime_prefill_baseline_ = 0;
+    std::uint64_t ui_requests_started_ = 0;
+    std::uint64_t ui_requests_completed_ = 0;
+    std::uint64_t ui_requests_failed_ = 0;
+    std::uint64_t ui_requests_rejected_ = 0;
+    std::uint64_t ui_cached_prompt_tokens_ = 0;
+#endif
 };
 
 } // namespace ninfer::serve
