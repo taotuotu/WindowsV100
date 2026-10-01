@@ -1,3 +1,4 @@
+// Modified for the Windows/V100 port by taotuotu, 2026; see NOTICE.
 #include "product/logging/startup_log.h"
 
 #include "product/logging/logging.h"
@@ -5,8 +6,18 @@
 
 #include <spdlog/logger.h>
 
-#include <sys/ioctl.h>
-#include <unistd.h>
+#if defined(_WIN32)
+#    ifndef NOMINMAX
+#        define NOMINMAX
+#    endif
+#    ifndef WIN32_LEAN_AND_MEAN
+#        define WIN32_LEAN_AND_MEAN
+#    endif
+#    include <windows.h>
+#else
+#    include <sys/ioctl.h>
+#    include <unistd.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -76,9 +87,19 @@ PhasePresentation phase_presentation(StartupPhase phase) noexcept {
 }
 
 std::size_t terminal_columns() noexcept {
+#if defined(_WIN32)
+    const HANDLE stderr_handle = GetStdHandle(STD_ERROR_HANDLE);
+    if (stderr_handle == nullptr || stderr_handle == INVALID_HANDLE_VALUE) { return 120; }
+    CONSOLE_SCREEN_BUFFER_INFO info{};
+    if (!GetConsoleScreenBufferInfo(stderr_handle, &info)) { return 120; }
+    const int columns = static_cast<int>(info.srWindow.Right) -
+                        static_cast<int>(info.srWindow.Left) + 1;
+    return columns > 0 ? static_cast<std::size_t>(columns) : 120;
+#else
     winsize size{};
     if (::ioctl(STDERR_FILENO, TIOCGWINSZ, &size) == 0 && size.ws_col != 0) { return size.ws_col; }
     return 120;
+#endif
 }
 
 std::string progress_bar(double ratio, std::size_t width) {

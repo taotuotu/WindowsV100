@@ -1,3 +1,4 @@
+// Modified for the Windows/V100 port by taotuotu, 2026; see NOTICE.
 #include "serve/serve_options.h"
 #include "product/speculative_options.h"
 
@@ -66,10 +67,20 @@ KvCapacityPolicy parse_kv_capacity(const char* text) {
 
 std::string serve_usage_text(const char* argv0) {
     return std::string("usage: ") + argv0 +
-           " <model.ninfer> [--host H] [--port N] [--api-key KEY] "
+#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+           " [model.ninfer] [--model PATH] "
+#else
+           " <model.ninfer> "
+#endif
+           "[--host H] [--port N] [--api-key KEY] "
            "[--model-id ID] [--max-context N] [--kv-capacity N|auto] [--max-concurrency N] "
            "[--max-pending-requests N] [--pending-timeout-ms N] "
-           "[--prefill-chunk N] [--log-stats-interval-ms N] [--device N] "
+           "[--prefill-chunk N] [--log-stats-interval-ms N] "
+#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+           "[--device auto|N] "
+#else
+           "[--device N] "
+#endif
            "[--context-cost-presets FILE] "
            "[--max-request-mib N] [--media-cache-mib N] [--media-live-mib N] "
            "[--media-preprocess-threads N] "
@@ -80,7 +91,11 @@ std::string serve_usage_text(const char* argv0) {
            "[--response-store-max-records N] [--response-store-max-mib N] "
            "[--kv-dtype bf16|int8|fp8|nvfp4|k8v4] [--spec mtp|dflash|dflash2 --draft-tokens N] "
            "[--default-max-tokens N] [--default-thinking-budget N] "
+#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+           "[--no-cuda-graph] [--no-prefix-reuse] "
+#else
            "[--vision] [--no-cuda-graph] [--no-prefix-reuse] "
+#endif
            "[--lm-head-draft] [--no-thinking] [--preserve-thinking] [--cors] "
            "[--temperature F] [--top-p F] [--top-k N] [--min-p F] [--presence-penalty F] "
            "[--frequency-penalty F] [--seed N] [--greedy]\n"
@@ -98,13 +113,25 @@ std::string serve_usage_text(const char* argv0) {
            "       Responses state is process-local and bounded to 1024 records / 256 MiB by "
            "default\n"
            "       --log-stats-interval-ms defaults to 5000; 0 disables periodic throughput logs\n"
+#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+           "       this text-only build rejects media input; Vision cannot be enabled\n"
+#else
            "       --vision enables media and loads the fixed Vision GPU allocations\n"
+#endif
            "       --kv-capacity auto leaves " +
            std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL)) +
            " MiB of sizing headroom\n"
+#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+           "       compatible-prefix reuse is enabled by default; hits require a matching prompt prefix "
+           "and saved state\n"
+           "       text-only cache defaults: extra Device StateImages=1, Host StateImages=2, Host KV=0 MiB, "
+           "private continuations=2x concurrency, shared prefixes=max(concurrency,4), anchors=1\n"
+           "       --no-prefix-reuse disables compatible-prefix caching\n"
+#else
            "       --no-prefix-reuse disables compatible-prefix caching (enabled by default)\n"
            "       context cache defaults: device-state=max-concurrency, private=2x concurrency, "
            "shared=max(max-concurrency,4), anchors=2; Host state=8 slots, Host KV=8192 MiB\n"
+#endif
            "       --device-state-slots is extra checkpoint capacity beyond active lanes; "
            "--host-kv-mib uses MiB\n"
            "       --default-thinking-budget caps model-origin thinking for enabled requests; "
@@ -112,11 +139,31 @@ std::string serve_usage_text(const char* argv0) {
            "       --preserve-thinking retains closed-turn assistant reasoning in later prompts\n"
            "       sampler defaults come from the loaded model and resolved thinking mode; "
            "server flags and request fields override individual values.\n"
-           "       --greedy forces temperature 0 (exact argmax).\n";
+           "       --greedy forces temperature 0 (exact argmax).\n"
+#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+           "       text-only Windows defaults: model "
+           "models/qwen3_8_27b_nvfp4_v2.ninfer, "
+           "host 127.0.0.1, port 8110, alias qwen3.8-27b, CUDA device auto (SM70, >=30 GiB), "
+           "context/KV 8192, "
+           "concurrency 1, prefill chunk 512, bf16 KV, MTP draft width 3 with optimized head, "
+           "thinking off, prefix reuse on, temperature 0, seed 123. Request sampling fields "
+           "may override process defaults.\n"
+           "       --device auto selects the first CUDA SM70 device with at least 30 GiB total memory; "
+           "pass --device N to select a device explicitly.\n"
+           "       supply the artifact positionally or with --model/-m.\n"
+#endif
+        ;
 }
 
 ServeOptions parse_serve_options(int argc, char** argv) {
     ServeOptions options;
+#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+    options.device                                      = -1;
+    options.context_cache.device_state_slots                = 1;
+    options.context_cache.host_state_slots                  = 2;
+    options.context_cache.host_kv_capacity_bytes            = 0;
+    options.context_cache.max_long_anchors_per_continuation = 1;
+#endif
     options.startup_argv.reserve(static_cast<std::size_t>(argc));
     bool redact_next = false;
     for (int i = 0; i < argc; ++i) {
@@ -143,6 +190,14 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             if (++i >= argc) { throw std::invalid_argument(std::string(flag) + " needs a value"); }
             return argv[i];
         };
+#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+        if (arg == "--model" || arg == "-m") {
+            options.artifact_path = require_value(arg.c_str());
+            if (options.artifact_path.empty()) {
+                throw std::invalid_argument(arg + " model path must not be empty");
+            }
+        } else
+#endif
         if (arg == "--host") {
             options.host = require_value("--host");
         } else if (arg == "--port") {
@@ -258,7 +313,16 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             }
             options.response_store_max_bytes = static_cast<std::size_t>(mib << 20);
         } else if (arg == "--device") {
-            options.device = parse_nonnegative_int(require_value("--device"), "device");
+            const char* value = require_value("--device");
+#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+            if (std::string_view(value) == "auto") {
+                options.device = -1;
+            } else {
+                options.device = parse_nonnegative_int(value, "device");
+            }
+#else
+            options.device = parse_nonnegative_int(value, "device");
+#endif
         } else if (arg == "--kv-dtype") {
             options.kv_cache = parse_kv_dtype(require_value("--kv-dtype"));
         } else if (arg == "--spec") {
@@ -279,7 +343,12 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             }
             options.default_thinking_budget = static_cast<std::uint32_t>(budget);
         } else if (arg == "--vision") {
+#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+            throw std::invalid_argument(
+                "--vision is unavailable in this text-only Windows server build");
+#else
             options.enable_vision = true;
+#endif
         } else if (arg == "--no-cuda-graph") {
             options.use_cuda_graph = false;
         } else if (arg == "--no-prefix-reuse") {
@@ -329,9 +398,11 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             throw std::invalid_argument(
                 "--no-prefix-reuse cannot be combined with context-cache capacity options");
         }
-        options.context_cache.enabled                = false;
-        options.context_cache.host_state_slots       = 0;
-        options.context_cache.host_kv_capacity_bytes = 0;
+        options.context_cache = ContextCacheOptions{
+            .enabled = false,
+            .host_state_slots = 0,
+            .host_kv_capacity_bytes = 0,
+        };
     }
     if (options.port <= 0 || options.port > 65535) {
         throw std::invalid_argument("--port must be in [1,65535]");

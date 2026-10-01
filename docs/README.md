@@ -1,3 +1,4 @@
+<!-- Modified for the Windows/V100 port by taotuotu, 2026; see NOTICE. -->
 # NInfer documentation
 
 Start with the [project README](../README.md) to build NInfer, download a published artifact, and
@@ -7,6 +8,8 @@ run the CLI or HTTP server.
 
 | Document | Purpose |
 |---|---|
+| [Windows / V100](windows-v100.md) | portable Windows text server, model download, browser chat, launch configuration and build |
+| [Windows performance](windows-performance.md) | local Windows measurements, scope limits and optimization evidence |
 | [CLI](cli.md) | text, chat-history, image/video input, output streams, sampling, MTP, and common runtime options |
 | [HTTP serving](serving.md) | OpenAI Responses/Chat Completions, Anthropic Messages, state, streaming, token counting, authentication, and tool calls |
 | [Performance](performance.md) | RTX 5090 single-request and concurrent-decode results, MTP/DFlash measurements, and reproduction commands |

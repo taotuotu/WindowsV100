@@ -1,3 +1,4 @@
+// Modified for the Windows/V100 port by taotuotu, 2026; see NOTICE.
 #pragma once
 
 #include "ops/common/math.cuh"
@@ -46,7 +47,7 @@ template <class Geometry, class Schedule>
 __global__ __launch_bounds__(
     Schedule::kThreads,
     Schedule::
-        kMinBlocksPerSm) void nvfp4_linear_swiglu_w4a4_tma_kernel(const __grid_constant__
+        kMinBlocksPerSm) void nvfp4_linear_swiglu_w4a4_tma_kernel(const NINFER_TMA_GRID_CONSTANT
                                                                       Nvfp4W4a4TmaDescriptors
                                                                           descriptors,
                                                                   float alpha,

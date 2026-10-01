@@ -1,322 +1,74 @@
-# NInfer
+<!-- Modified for the Windows/V100 port by taotuotu, 2026; see NOTICE. -->
+# NInfer Windows / V100
 
-> Up to 219 decode tok/s from Qwen 3.8 27B on a single V100.  With software NVFP4 on Volta.
+在 Windows 上运行 Qwen3.8-27B：常驻本地 API、自带浏览器聊天、真实 token 速率和前缀缓存。
 
-NInfer is a from-scratch C++/CUDA inference engine optimized for selected Qwen checkpoints on NVIDIA Tesla V100.
+这是 [geoffwatts/ninfer-v100](https://github.com/geoffwatts/ninfer-v100) 的 Windows 衍生版本，基线为 `b37d0dd`，主项目许可为 Apache-2.0。模型运行时、Volta 算子和推测解码来自上游；本分支补充 Windows 平台兼容、文本程序入口、便携启动器和浏览器界面。完整来源见 [NOTICE](NOTICE)、[第三方许可](THIRD_PARTY_NOTICES.md) 与 [来源记录](docs/provenance.md)。
 
-It supports text, image, and video input through a local CLI or OpenAI-/Anthropic-compatible HTTP APIs. The runtime is intentionally narrow: one GPU, one resident model, 1–8 active requests.
+## 支持范围
 
-## Models
+- **显卡：V100 32GB / 同类 SM70 Volta 32GB。** 当前 Windows 构建面向 `sm_70`；不提供 RTX 显卡兼容承诺。
+- **模型：固定的 Qwen3.8-27B mixed NVFP4/FP8 `.ninfer` v2**，约 23.72 GB。下载器固定 revision、大小和 SHA256；权重不随源码或程序 ZIP 分发。
+- **输入：文本与工具历史。** 常驻服务提供 OpenAI Chat Completions / Responses、Anthropic Messages 和流式输出；Windows 构建关闭图像、视频输入。
+- **网页：** 多轮聊天、思考折叠、停止生成、完整模型标识、decode tok/s、首字延迟和缓存命中。
+- **KV：** BF16 / INT8 / FP8；默认 BF16。MTP 默认 learned window 3、optimized proposal head，前缀复用默认开启。
 
-| Model | Weights | Artifact | Download and model card |
-|---|---|---|---|
-| Qwen3.6-27B | `groupwise-int` | `qwen3_6_27b.ninfer` | [Qwen3.6-27B](https://huggingface.co/neroued/Qwen3.6-27B-NInfer) |
-| Qwen3.6-27B | `nvfp4` | `qwen3_6_27b_nvfp4.ninfer` | [Qwen3.6-27B NVFP4](https://huggingface.co/neroued/Qwen3.6-27B-nvfp4-NInfer) |
-| Qwen3.8-27B | `groupwise-int` | `qwen3_8_27b.ninfer` | [Qwen3.8-27B](https://huggingface.co/neroued/Qwen3.8-27B-NInfer) |
-| Qwen3.8-27B | `nvfp4` | `qwen3_8_27b_nvfp4.ninfer` | [Qwen3.8-27B NVFP4](https://huggingface.co/neroued/Qwen3.8-27B-nvfp4-NInfer) |
-| Qwen3.6-35B-A3B | `groupwise-int` | `qwen3_6_35b_a3b.ninfer` | [Qwen3.6-35B-A3B](https://huggingface.co/neroued/Qwen3.6-35B-A3B-NInfer) |
+此程序加载显式注册的 `.ninfer` artifact。GGUF 和任意 Q2/Q3/Q4/Q5/Q6 文件不能直接使用；其它模型的上游注册情况不等于本 Windows 发行版已经测过。
 
-Artifacts contain the exact model weights, tokenizer, chat template, and required media frontend resources.
+## 快速开始
 
-## Performance
+需要 Windows x64、匹配的 NVIDIA 驱动，以及 [Microsoft x64 Visual C++ Redistributable](https://aka.ms/vs/17/release/vc_redist.x64.exe)。预编译 ZIP 会带 CUDA 12 runtime；驱动和模型需自行安装或下载。建议至少 32 GB 系统内存、40 GB 可用磁盘。
 
-Qwen3.8-27B NVFP4 reaches **218.98 decode tok/s** at K=1, with 99.2% MTP draft acceptance.
-That result is on a V100-PCIe-32GB, not SXM. The equivalent SXM2 card is roughly 7% faster; decode is predominantly HBM-bound, so PCIe bandwidth and host performance have little effect.
+在解压后的程序目录，或已经完成构建的源码根目录，执行：
 
-### Tesla V100: software NVFP4 and groupwise inference
-
-The Qwen3.8-27B NVFP4 short-context target round, retested after the width-6+ verify fix below,
-peaks at K=1 draft tokens: **219.0 decode tok/s** at 99.2% draft acceptance -- narrow windows win
-outright on this corpus; see the full K sweep below.
-
-The single-request sweep uses the public Engine benchmark on a Tesla V100-PCIe-32GB with CUDA
-12.8 and INT8 group-64 KV. Prefill is an isolated `pp2048` run; decode is `pp2048+tg256` with CUDA
-Graphs and the optimized proposal head. Each result uses one discarded warmup and three measured
-repetitions. On the DFlash window sweep in the V100 notes the preferred V100-SXM2-32GB ran about
-7% faster per round; this decode workload is HBM-bound, so the host and PCIe bus barely matter.
-
-| Model profile | K | Prefill tok/s | Decode tok/s | Draft acceptance |
-|---|---:|---:|---:|---:|
-| Qwen3.6-27B `groupwise-int` MTP | 4 | 1,085.0 | 54.54 | 66.5% |
-| Qwen3.6-27B `nvfp4` MTP | 5 | 223.8 | 55.22 | 54.4% |
-| Qwen3.8-27B `groupwise-int` MTP | 5 | 1,083.9 | 130.96 | 97.1% |
-| Qwen3.8-27B `nvfp4` MTP | 5 | 1,100.3 | 199.58 | 97.1% |
-| Qwen3.8-27B `groupwise-int` DFlash2 | 7 | 1,044.2 | 77.84 | 100% |
-| Qwen3.8-27B `nvfp4` DFlash2 | 7 | 1,059.0 | 126.32 | 100% |
-| Qwen3.6-35B-A3B `groupwise-int` DFlash | 4 | 686.2 | 139.58 | 90.9% |
-
-
-Full Qwen3.8-27B `nvfp4` MTP draft-window sweep on this same corpus-continuation shape, now that
-the width-6+ fix removes the sm_70 cap at four:
-
-| K | Prefill tok/s | Decode tok/s | Draft acceptance |
-|---:|---:|---:|---:|
-| 1 | 1,102.5 | **218.98** | 99.2% |
-| 2 | 1,097.4 | 213.99 | 98.3% |
-| 3 | 1,094.9 | 209.24 | 97.5% |
-| 4 | 1,096.6 | 204.02 | 97.9% |
-| 5 | 1,100.3 | 199.58 | 97.1% |
-| 6 | 1,089.6 | 178.47 | 92.5% |
-| 7 | 1,087.2 | 180.74 | 93.3% |
-
-This corpus is a deterministic continuation with unusually high, near-ceiling acceptance at every
-K, so narrow windows win outright: round-verify cost dominates once there's little more accepted
-length to buy. Treat these as a synthetic-corpus ceiling, not a general-generation rate -- on real,
-less predictable text the practical production sweet spot is K=3 (see the long-context sweep
-elsewhere in this repo's history).
-
-Decode throughput depends strongly on draft acceptance -- see the MTP sweep above for how much.
-The sm_70 width-6+ target-verify regression is fixed (see below), so `--spec mtp` now accepts the
-same [1,7] window upstream does, no Volta-specific cap. `--spec dflash2` peaks at K=7 on this same
-corpus-continuation shape (a 3-10 sweep falls off on both sides); MTP still leads DFlash2 here at
-every K tried.
-
-The Qwen3.8-27B artifacts also bundle DFlash2, the upstream masked-block speculative decoder
-(`--spec dflash2`). MTP remains the recommended Volta backend for general decoding. On a varied,
-non-repetitive corpus, DFlash2 K=7 narrowly beat the best MTP window at 2K and 32K context, while
-MTP led at 8K, 16K, and 150K. DFlash2 K=7 is its strongest static default; acceptance-driven
-window adaptation can favor K=3 on difficult continuations. See the full comparison in the
-[V100 port notes](docs/v100.md#varied-context-dflash2-sweep).
-
-MTP automatically extends verification up to fifteen draft tokens when the generated suffix
-exactly matches an earlier 16-token span and the learned proposal agrees with the lookup
-continuation. On a 172-token verbatim-copy prompt, Qwen3.8-27B NVFP4 produced the exact
-continuation at **201.0 tok/s**, averaging 12.91 output tokens per round. This is a
-context-reproduction fast path; ordinary generation continues to use the normal MTP window and
-the general decode results above.
-
-Context-lookup MTP was inspired by
-[syv-ai/qwen38-27b-rtx3090](https://github.com/syv-ai/qwen38-27b-rtx3090).
-
-On Volta, NVFP4 is decoded and executed in software using tuned FP16 tensor-core and SIMT kernels.
-Dense MLP gate/up payloads are prepacked in place during model load for the QPN decode layout; the
-artifact on disk is unchanged and inference does not perform runtime weight repacking. The Volta
-QPN prepacking work was inspired by
-[dnv2003/v100-skinny](https://github.com/dnv2003/v100-skinny).
-
-The 35B-A3B production DFlash round at a 2,048-token context uses K=3: **125.9 tok/s** and 3.8
-mean output tokens per round over ten measured rounds after two warmups.
-
-## Quick start
-
-NInfer requires 64-bit Linux, a Tesla V100 with CUDA Toolkit 12.8, CMake 3.28 or newer, a C++20
-host compiler, Ninja, `pkg-config`, FFmpeg
-development libraries (`libavformat >= 60`, `libavcodec >= 60`, `libavutil >= 58`, and
-`libswscale >= 7`), and `libcurl >= 7.85`. This port builds for `sm_70`.
-
-Select CUDA 12.8 and Volta explicitly:
-
-```bash
-cmake -S . -B build-v100 -G Ninja -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
-  -DCMAKE_CUDA_ARCHITECTURES=70
-cmake --build build-v100 -j
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\download-model.ps1
+.\start-ninfer.bat
 ```
 
-The same five `.ninfer` artifacts use the public Engine/CLI/serving routes. See the
-[V100 port notes](docs/v100.md) for qualification and the preferred-GPU launcher.
+看到服务监听后，双击 `open-chat.bat`，或打开 **http://127.0.0.1:8110/**。启动窗口保持运行，Ctrl+C 停止；`stop-ninfer.bat` 也可停止匹配的实例。页面聊天只保存在内存里，刷新会清空。
 
-On Volta, loading an NVFP4 artifact repacks each dense MLP gate/up and down payload in place on the
-GPU into the QPN fragment order used by the decode kernels. Row-scaled FP8 payloads are likewise
-permuted into their native Volta QPN stream. The `.ninfer` file and host-side artifact bytes
-are unchanged, the device allocation remains the same size, and temporary repack storage is
-released before inference. These device-resident weights are therefore deliberately mutated at
-load; the V100 path does not retain checkpoint-native immutable layout for those payloads.
+源码用户先安装 Visual Studio 2022 的 C++ / Windows SDK 组件、CUDA Toolkit **12.9** 和 CMake 3.28+，再构建：
 
-Tests, benchmarks, and maintainer tools are excluded from the default build. There is no install
-target or packaged binary distribution; run NInfer from its source build tree.
-
-Download the artifact used by this example with the Hugging Face CLI:
-
-```bash
-hf download neroued/Qwen3.8-27B-nvfp4-NInfer \
-  qwen3_8_27b_nvfp4.ninfer \
-  --local-dir models
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-windows-v100.ps1 -Step all -Parallel 4
 ```
 
-Start a long-running text/vision agent server with one active-request lane and Device/Host
-checkpoint retention:
+CUDA 13 已移除 Volta 编译支持。更详细的安装、配置和问题处理见 [Windows 使用指南](docs/windows-v100.md)。
 
-```bash
-./build/apps/ninfer-serve models/qwen3_8_27b_nvfp4.ninfer \
-  --max-context 240000 \
-  --prefill-chunk 2048 \
-  --kv-capacity auto \
-  --max-concurrency 1 \
-  --kv-dtype int8 \
-  --device-state-slots 1 \
-  --host-state-slots 8 \
-  --host-kv-mib 8192 \
-  --spec mtp --draft-tokens 4 \
-  --lm-head-draft \
-  --preserve-thinking \
-  --vision
+## 接入其它客户端
+
+| 项目 | 默认值 |
+|---|---|
+| 协议 | OpenAI 兼容 |
+| Base URL | `http://127.0.0.1:8110/v1` |
+| Model | `qwen3.8-27b` |
+| API key | 默认不鉴权；客户端必填时可填 `local` |
+| 上下文容量 | 8192，输入与输出合计 |
+| 活动请求 | 1，额外请求排队 |
+
+提高容量或指定设备：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-ninfer-server.ps1 -Device 1 -Context 153600 -KvDtype bf16
 ```
 
-Each request has a 240,000-token logical ceiling. The Device KV pool is sized from the memory left
-after weights, workspace, state, Vision, and graph allocations. The cache tiers provide one Device
-checkpoint slot, eight pinned Host State slots, and 8 GiB of pinned Host KV.
+153600 是本机 32GB Volta 上成功分配的配置，需要充足空闲显存；它不代表 15 万 token 实际输入的性能或质量已经验证。可把个人设置写入 `.local/windows-server.psd1`，显式命令参数优先；该目录不会进入源码或发行包。
 
-Send an OpenAI-style request:
+## 性能与继续优化
 
-```bash
-curl http://127.0.0.1:8080/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "model": "qwen3.8-27b",
-    "messages": [{"role": "user", "content": "Reply with one short sentence."}],
-    "max_tokens": 64
-  }'
+手动任务反馈：**英文作文约90 tok/s、代码约90 tok/s、中文作文约70 tok/s**。这些是日常任务的近似平均速率，输入/输出长度与重复次数尚未完整归档。
+
+此前记录的 BF16 KV、MTP3、实际 5118-token 输入任务平均约 **63.87 decode tok/s**。真实 HTTP 调用观察到约 **46–138 tok/s**，接受率、输出内容和上下文不同，不能把这个范围当成固定吞吐承诺。
+
+前缀缓存已在真实客户端多轮调用中生效：一次 13894-token 请求命中 13447 token，只计算余下 447 token，服务端首字约 0.82 秒。冷前缀依然需要完整预填充。
+
+下一步有价值的方向是冷长输入的预填充分块和主机提交开销，以及受控比较 MTP 窗口。**本轮发布准备没有新增速度测试或宣称新的提速。** 历史测量、不同配置比较的限制及优化依据见 [Windows 性能记录](docs/windows-performance.md)。上游 Linux 的合成续写约 219 tok/s 不作为此 Windows 版本的普通任务速度。
+
+## 打包与开发（源码目录）
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\package-windows.ps1
 ```
 
-Run a one-shot CLI request with a 32,768-token allocation:
-
-```bash
-./build/apps/ninfer models/qwen3_8_27b_nvfp4.ninfer \
-  --prompt "Explain prefill and decode, then give a concise conclusion." \
-  --max-context 32768 \
-  --max-new 8192 \
-  --kv-dtype fp8 \
-  --spec mtp --draft-tokens 3 \
-  --lm-head-draft
-```
-
-Answer content is written to stdout. Structured startup/runtime-error records and the CLI-owned
-reasoning, timing, throughput, memory, and speculative-decoding report are written to stderr;
-reasoning and the result report remain unprefixed product output. On a terminal, weight
-materialization additionally uses one transient progress line. Redirected stderr receives only
-persistent structured phase records, including rate-limited progress for long loads. Option and
-local input errors remain direct command diagnostics. Use `--messages FILE` and `--vision` for
-structured image/video input; see the [CLI guide](docs/cli.md) and
-[committed examples](examples/cli/).
-
-## Resource-aware long-context reuse
-
-A reusable prefix checkpoint contains KV and the complete continuation state for its exact prompt
-frontier. A Device-resident checkpoint resumes directly. Under pressure, the planner weighs Device
-retention, pinned Host State/KV, and eviction by immediate restore work and later reuse cost. Active
-requests retain their completion reservations.
-
-See [Resource scheduling and context cache](docs/maintainer/resource-scheduling-and-context-cache.md)
-for the algorithm and [Serve TTFT benchmark](tools/bench/ttft/) for public-HTTP coverage of hot
-reuse, Host resume, eviction, shared prefixes, scheduling boundaries, and multimodal load.
-
-## Evaluation
-
-Capability scores were measured through NInfer's OpenAI-compatible serving route with thinking
-enabled, MTP3, and EvalScope 1.9.0 (0-shot, rule scoring, one sample per problem):
-
-| Model profile | AIME 2025 | AIME 2026 | GPQA-Diamond | ERQA | RealWorldQA |
-|---|---:|---:|---:|---:|---:|
-| [Qwen3.6-27B groupwise-int](model-cards/Qwen3.6-27B-NInfer/README.md) | 86.67% | 93.33% | 86.87% | — | — |
-| [Qwen3.6-27B NVFP4](model-cards/Qwen3.6-27B-nvfp4-NInfer/README.md) | 93.33% | 93.33% | 84.34% | — | — |
-| [Qwen3.6-35B-A3B groupwise-int](model-cards/Qwen3.6-35B-A3B-NInfer/README.md) | 90.00% | 90.00% | 85.35% | — | — |
-| [Qwen3.8-27B groupwise-int](model-cards/Qwen3.8-27B-NInfer/README.md) | 96.67% | 96.67% | 87.37% | 66.25% | 82.22% |
-| [Qwen3.8-27B NVFP4](model-cards/Qwen3.8-27B-nvfp4-NInfer/README.md) | 96.67% | 96.67% | 90.40% | 66.25% | 83.53% |
-
-The Qwen3.6 rows used temperature 0.6 and presence penalty 1.0; the Qwen3.8 rows used temperature
-1.0 and presence penalty 0.0. Multimodal evaluation used `--vision` and an 81,920-token context
-limit. Text evaluation used 262,144 tokens except Qwen3.8-27B NVFP4, which used 252,928 tokens for
-its measured memory envelope. Each score is one sample per problem; model cards contain the
-correct/total counts and evaluation notes.
-
-## Startup notes
-
-GPU residency is fixed at process startup. `--spec` selects speculative decoding residency, and
-`--vision` selects Vision residency. DFlash is available for text-only Qwen3.6-35B-A3B execution,
-and DFlash2 for Qwen3.8-27B.
-
-## Docker
-
-Build the runtime image on a host with the NVIDIA Container Toolkit:
-
-```bash
-docker build --tag ninfer:local .
-```
-
-Mount the downloaded model and run the same example server profile:
-
-```bash
-docker run --rm \
-  --gpus '"device=0"' \
-  --publish 8080:8080 \
-  --volume "$PWD/models:/models:ro" \
-  ninfer:local \
-  ninfer-serve /models/qwen3_8_27b_nvfp4.ninfer \
-  --host 0.0.0.0 \
-  --max-context 240000 \
-  --kv-capacity auto \
-  --max-concurrency 1 \
-  --kv-dtype int8 \
-  --device-state-slots 1 \
-  --host-state-slots 8 \
-  --host-kv-mib 8192 \
-  --spec mtp --draft-tokens 4 \
-  --lm-head-draft \
-  --preserve-thinking \
-  --vision
-```
-
-## Capabilities and limits
-
-All registered model IDs support:
-
-- text generation with thinking and non-thinking prompt modes;
-- image, multi-image, video, and mixed multimodal messages;
-- chunked prefill, exact-batch CUDA Graph decode, and startup-bounded batched decode;
-- MTP speculative decoding with draft windows from one to seven;
-- DFlash2 masked-block speculative decoding for Qwen3.8-27B (from the upstream integration),
-  draft windows from one to fifteen;
-- BF16, INT8, and FP8 KV storage;
-- offline causal-perplexity scoring;
-- private and shared exact-prefix reuse with Device/Host State and KV retention;
-- model-aware sampling defaults and explicit sampler overrides;
-- OpenAI Responses Core, OpenAI Chat Completions, and Anthropic Messages, including streaming,
-  tools, local response state, token counting, and usage accounting.
-
-The 35B-A3B target additionally supports text-only DFlash with draft windows from one to fifteen.
-
-The product boundary remains intentionally small:
-
-- one Tesla V100 and one resident model per Engine;
-- a startup-fixed capacity of one to eight active requests with bounded FIFO ingress;
-- no request preemption, priority/QoS, active-request swapping, weight offload, multi-GPU, or
-  distributed serving;
-- one shared startup-fixed KV pool across active requests and retained prefixes;
-- no runtime model discovery or unregistered checkpoint fallback;
-- parsed tool calls are returned to the client; NInfer does not execute tools;
-- the in-tree C++ headers are not distributed as an installed SDK.
-
-`--max-context` is each sequence's logical limit. `--kv-capacity` sizes the shared Main Text KV pool
-used by active requests and retained prefixes; `auto` resolves the largest legal capacity at
-startup from the memory remaining after weights while keeping 1 GiB of sizing headroom. Explicit
-capacities remain fixed for the process lifetime.
-
-## Documentation
-
-- [Documentation index](docs/README.md)
-- [CLI](docs/cli.md)
-- [HTTP serving](docs/serving.md)
-- [V100 qualification and performance](docs/v100.md)
-- [Perplexity evaluation](docs/perplexity.md)
-- [Resource scheduling and context cache](docs/maintainer/resource-scheduling-and-context-cache.md)
-- [Serve TTFT benchmark](tools/bench/ttft/)
-- [CLI examples](examples/cli/)
-- [Contributing](CONTRIBUTING.md)
-
-Run the relevant `--help` for the exact current option contract.
-
-## License
-
-NInfer is licensed under the [Apache License 2.0](LICENSE).
-
-The published artifacts are derived from
-[Qwen/Qwen3.6-27B](https://huggingface.co/Qwen/Qwen3.6-27B),
-[Qwen/Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B), and
-[Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B). The Qwen3.6-27B NVFP4 artifact
-also uses the fixed packed weights from
-[rdtand/Qwen3.6-27B-PrismaSCOUT-Blackwell-NVFP4-BF16-vllm](https://huggingface.co/rdtand/Qwen3.6-27B-PrismaSCOUT-Blackwell-NVFP4-BF16-vllm).
-The Qwen3.8-27B NVFP4 artifact also uses the fixed mixed FP8/NVFP4 weights from
-[unsloth/Qwen3.8-27B-NVFP4](https://huggingface.co/unsloth/Qwen3.8-27B-NVFP4). These source
-repositories are distributed under Apache-2.0. Vendored dependencies retain their own license files
-under `third_party/`.
+打包器生成源码包和 Windows 程序包，附许可证及校验信息；不打包权重、驱动、个人配置、运行日志或聊天记录。二进制只面向上述 Windows / Volta 配置。底层架构及原项目文档保留在 [docs](docs/README.md)。

@@ -1,6 +1,18 @@
+<!-- Modified for the Windows/V100 port by taotuotu, 2026; see NOTICE. -->
 # AGENTS.md
 
 These rules apply to the whole repository.
+
+## Windows derivative scope
+
+This derivative explicitly adds the Windows x64 / SM70 Volta 32GB text-only product.
+Its user commands, default configuration, pinned container-v2 artifact and measured scope are
+defined in `docs/windows-v100.md` and `docs/windows-performance.md`. Prefer those authorities
+for Windows work; the upstream Linux/RTX5090 settings below remain references for their own
+routes. Personal machine settings belong in ignored `.local/`, not product defaults.
+Source and release packages must preserve LICENSE, NOTICE and THIRD_PARTY_NOTICES.md; exclude
+weights, runtime request logs and personal configuration. Do not publish upstream benchmark
+rates as measured Windows rates. Existing Engine and ownership contracts still apply.
 
 ## Objective and scope
 

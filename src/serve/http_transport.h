@@ -1,3 +1,4 @@
+// Modified for the Windows/V100 port by taotuotu, 2026; see NOTICE.
 #pragma once
 
 #include "serve/generation_service.h"
@@ -51,9 +52,9 @@ public:
     void write(const std::vector<std::string>& items, Clock::time_point now = Clock::now());
 
     // Called by the Engine wait loop. Besides observing an already-closed socket, a quiet stream
-    // periodically writes its protocol-selected SSE heartbeat so TCP_USER_TIMEOUT has traffic
-    // with which to detect an unacknowledged peer. A failed probe marks the request for
-    // cancellation.
+    // periodically writes its protocol-selected SSE heartbeat so the platform transport can
+    // detect a peer that stops acknowledging traffic. A failed writability probe or heartbeat
+    // write marks the request for cancellation.
     [[nodiscard]] bool poll(Clock::time_point now = Clock::now());
 
 private:

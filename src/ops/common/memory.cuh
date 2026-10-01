@@ -1,7 +1,24 @@
+// Modified for the Windows/V100 port by taotuotu, 2026; see NOTICE.
 #pragma once
 
 #include <cuda_pipeline.h>
 #include <cuda_runtime.h>
+
+// MSVC cannot pass 128-byte-aligned kernel parameters through NVCC's generated host stubs (C2719).
+// These TMA kernels are unavailable on this Volta-only Windows build, so omit their parameter
+// alignment annotations there. Other builds keep the same host/device type layout and grid-constant
+// declaration as the original Hopper+ implementation.
+#if defined(_WIN32) && defined(NINFER_VOLTA_BUILD)
+#    define NINFER_TMA_GRID_CONSTANT
+#    define NINFER_TMA_DESCRIPTOR_ALIGN
+#else
+#    if defined(__CUDACC__)
+#        define NINFER_TMA_GRID_CONSTANT __grid_constant__
+#    else
+#        define NINFER_TMA_GRID_CONSTANT
+#    endif
+#    define NINFER_TMA_DESCRIPTOR_ALIGN alignas(128)
+#endif
 
 namespace ninfer::ops {
 

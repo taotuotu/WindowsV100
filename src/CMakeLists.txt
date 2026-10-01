@@ -1,3 +1,4 @@
+# Modified for the Windows/V100 port by taotuotu, 2026; see NOTICE.
 function(ninfer_internal_includes target)
   target_include_directories(${target} PRIVATE
     ${PROJECT_SOURCE_DIR}/include
@@ -392,11 +393,14 @@ add_library(ninfer_text STATIC
   text/unicode.cpp
   ${PROJECT_SOURCE_DIR}/third_party/utf8proc/utf8proc.c)
 ninfer_internal_includes(ninfer_text)
+target_compile_definitions(ninfer_text PUBLIC UTF8PROC_STATIC)
 
-add_library(ninfer_media_decode STATIC
-  media/decode/decode.cpp)
-ninfer_internal_includes(ninfer_media_decode)
-target_link_libraries(ninfer_media_decode PRIVATE PkgConfig::FFMPEG)
+if(NINFER_BUILD_MEDIA_DECODE)
+  add_library(ninfer_media_decode STATIC
+    media/decode/decode.cpp)
+  ninfer_internal_includes(ninfer_media_decode)
+  target_link_libraries(ninfer_media_decode PRIVATE PkgConfig::FFMPEG)
+endif()
 
 if(NINFER_BUILD_MEDIA_ACQUIRE)
   # Product-only path/data/HTTP acquisition. No target package links this library.
@@ -404,6 +408,11 @@ if(NINFER_BUILD_MEDIA_ACQUIRE)
     product/media_acquire/acquire.cpp)
   ninfer_internal_includes(ninfer_media_acquire)
   target_link_libraries(ninfer_media_acquire PRIVATE PkgConfig::LIBCURL)
+elseif(NINFER_BUILD_WINDOWS_SERVE)
+  # The text-only Windows HTTP service must never fetch request-supplied media.
+  add_library(ninfer_media_acquire STATIC
+    product/media_acquire/windows_text_only.cpp)
+  ninfer_internal_includes(ninfer_media_acquire)
 endif()
 
 if(NINFER_BUILD_PROMPT_INPUT)
@@ -414,7 +423,7 @@ if(NINFER_BUILD_PROMPT_INPUT)
   target_link_libraries(ninfer_product_prompt_input PRIVATE ninfer_media_acquire)
 endif()
 
-if(NINFER_BUILD_APPS OR BUILD_TESTING)
+if(NINFER_BUILD_APPS OR BUILD_TESTING OR NINFER_BUILD_WINDOWS_SERVE)
   add_library(ninfer_product_logging STATIC
     product/logging/logging.cpp
     product/logging/pretty_format.cpp
@@ -441,11 +450,69 @@ target_link_libraries(ninfer_engine
     ninfer_artifact
     ninfer_core
     ninfer_ops
-    ninfer_text
-    ninfer_media_decode)
+    ninfer_text)
+if(NINFER_BUILD_MEDIA_DECODE)
+  target_link_libraries(ninfer_engine PRIVATE ninfer_media_decode)
+endif()
 add_library(ninfer::engine ALIAS ninfer_engine)
 
 if(NINFER_BUILD_SERVE)
+  if(WIN32 AND NINFER_BUILD_WINDOWS_SERVE)
+    set(NINFER_WINDOWS_CHAT_PAGE_HTML_FILE
+      "${CMAKE_CURRENT_SOURCE_DIR}/serve/web/index.html")
+    if(NOT EXISTS "${NINFER_WINDOWS_CHAT_PAGE_HTML_FILE}")
+      message(FATAL_ERROR
+        "Windows text-only serving requires src/serve/web/index.html")
+    endif()
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+      "${NINFER_WINDOWS_CHAT_PAGE_HTML_FILE}")
+    file(READ "${NINFER_WINDOWS_CHAT_PAGE_HTML_FILE}" NINFER_WINDOWS_CHAT_PAGE_HTML)
+    string(FIND "${NINFER_WINDOWS_CHAT_PAGE_HTML}" ")NINFERCHAT\""
+      NINFER_WINDOWS_CHAT_PAGE_DELIMITER_POSITION)
+    if(NOT NINFER_WINDOWS_CHAT_PAGE_DELIMITER_POSITION EQUAL -1)
+      message(FATAL_ERROR
+        "src/serve/web/index.html contains the reserved raw-string delimiter )NINFERCHAT\"")
+    endif()
+    set(NINFER_WINDOWS_CHAT_PAGE_REMAINING "${NINFER_WINDOWS_CHAT_PAGE_HTML}")
+    set(NINFER_WINDOWS_CHAT_PAGE_LINE 1)
+    while(TRUE)
+      string(FIND "${NINFER_WINDOWS_CHAT_PAGE_REMAINING}" "\n"
+        NINFER_WINDOWS_CHAT_PAGE_NEWLINE_POSITION)
+      if(NINFER_WINDOWS_CHAT_PAGE_NEWLINE_POSITION EQUAL -1)
+        set(NINFER_WINDOWS_CHAT_PAGE_CURRENT_LINE "${NINFER_WINDOWS_CHAT_PAGE_REMAINING}")
+        set(NINFER_WINDOWS_CHAT_PAGE_AT_END TRUE)
+      else()
+        string(SUBSTRING "${NINFER_WINDOWS_CHAT_PAGE_REMAINING}" 0
+          ${NINFER_WINDOWS_CHAT_PAGE_NEWLINE_POSITION} NINFER_WINDOWS_CHAT_PAGE_CURRENT_LINE)
+        math(EXPR NINFER_WINDOWS_CHAT_PAGE_NEXT_LINE_START
+          "${NINFER_WINDOWS_CHAT_PAGE_NEWLINE_POSITION} + 1")
+        string(SUBSTRING "${NINFER_WINDOWS_CHAT_PAGE_REMAINING}"
+          ${NINFER_WINDOWS_CHAT_PAGE_NEXT_LINE_START} -1 NINFER_WINDOWS_CHAT_PAGE_REMAINING)
+        set(NINFER_WINDOWS_CHAT_PAGE_AT_END FALSE)
+      endif()
+      string(HEX "${NINFER_WINDOWS_CHAT_PAGE_CURRENT_LINE}" NINFER_WINDOWS_CHAT_PAGE_LINE_HEX)
+      string(LENGTH "${NINFER_WINDOWS_CHAT_PAGE_LINE_HEX}" NINFER_WINDOWS_CHAT_PAGE_LINE_HEX_LENGTH)
+      math(EXPR NINFER_WINDOWS_CHAT_PAGE_LINE_BYTES
+        "${NINFER_WINDOWS_CHAT_PAGE_LINE_HEX_LENGTH} / 2")
+      if(NINFER_WINDOWS_CHAT_PAGE_LINE_BYTES GREATER 12000)
+        message(FATAL_ERROR
+          "src/serve/web/index.html line ${NINFER_WINDOWS_CHAT_PAGE_LINE} exceeds 12000 bytes; "
+          "split this line so MSVC can compile the embedded page")
+      endif()
+      if(NINFER_WINDOWS_CHAT_PAGE_AT_END)
+        break()
+      endif()
+      math(EXPR NINFER_WINDOWS_CHAT_PAGE_LINE "${NINFER_WINDOWS_CHAT_PAGE_LINE} + 1")
+    endwhile()
+    string(REPLACE "\n" "\n)NINFERCHAT\"\nR\"NINFERCHAT("
+      NINFER_WINDOWS_CHAT_PAGE_HTML_CHUNKS "${NINFER_WINDOWS_CHAT_PAGE_HTML}")
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated/serve/web")
+    configure_file(
+      "${CMAKE_CURRENT_SOURCE_DIR}/serve/web/chat_page.h.in"
+      "${CMAKE_CURRENT_BINARY_DIR}/generated/serve/web/chat_page.h"
+      @ONLY)
+  endif()
+
   # HTTP protocol/product adapter. No serving header is part of the public API.
   add_library(ninfer_serve STATIC
     serve/http_transport.cpp
@@ -472,7 +539,19 @@ if(NINFER_BUILD_SERVE)
   ninfer_internal_includes(ninfer_serve)
   target_include_directories(ninfer_serve PRIVATE
     ${PROJECT_SOURCE_DIR}/third_party/cpp-httplib)
+  if(WIN32 AND NINFER_BUILD_WINDOWS_SERVE)
+    target_include_directories(ninfer_serve PRIVATE
+      "${CMAKE_CURRENT_BINARY_DIR}/generated")
+  endif()
   target_link_libraries(ninfer_serve
     PUBLIC ninfer_engine Threads::Threads
     PRIVATE ninfer_media_acquire ninfer_product_logging CUDA::cudart)
+  if(WIN32 AND NINFER_BUILD_WINDOWS_SERVE)
+    target_compile_definitions(ninfer_serve
+      PRIVATE NINFER_WINDOWS_TEXT_ONLY_SERVE=1
+      PUBLIC _WIN32_WINNT=0x0A00 NOMINMAX WIN32_LEAN_AND_MEAN)
+  endif()
+  if(WIN32)
+    target_link_libraries(ninfer_serve PRIVATE ws2_32)
+  endif()
 endif()

@@ -1,3 +1,4 @@
+# Modified for the Windows/V100 port by taotuotu, 2026; see NOTICE.
 cmake_minimum_required(VERSION 3.28)
 
 # Upstream NInfer is compiled only for sm_120a. This port adds sm_70 (Volta /
@@ -22,6 +23,17 @@ endif()
 
 project(ninfer LANGUAGES C CXX CUDA)
 
+if(WIN32)
+  # Windows.h defines function-like min/max macros that break std::min/std::max throughout
+  # the public contracts and CUDA host code.
+  add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN)
+  if(MSVC)
+    add_compile_options(
+      "$<$<OR:$<COMPILE_LANGUAGE:C>,$<COMPILE_LANGUAGE:CXX>>:/utf-8>"
+      "$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/utf-8>")
+  endif()
+endif()
+
 # CUTLASS: Volta (sm_70) has real FP16 tensor cores (mma.sync.m8n8k4) but no bf16/int
 # tensor-core support and no equivalent to the mma.cuh helpers this codebase's Ampere+
 # kernels use. Rather than hand-writing raw Volta mma.sync PTX (a large, error-prone
@@ -39,16 +51,33 @@ if(CMAKE_CUDA_ARCHITECTURES STREQUAL "70")
   FetchContent_Declare(
     cutlass
     GIT_REPOSITORY https://github.com/nvidia/cutlass.git
-    GIT_TAG v4.4.2
-    GIT_SHALLOW TRUE
+    GIT_TAG da5e086dab31d63815acafdac9a9c5893b1c69e2 # v4.4.2, immutable source revision
+    GIT_SHALLOW FALSE
     GIT_PROGRESS TRUE)
   FetchContent_MakeAvailable(cutlass)
 endif()
 
 # --- Global settings ---------------------------------------------------------
-option(NINFER_BUILD_APPS "Build the NInfer CLI and server" ON)
+if(WIN32)
+  set(_ninfer_apps_default OFF)
+else()
+  set(_ninfer_apps_default ON)
+endif()
+option(NINFER_BUILD_APPS "Build the NInfer CLI and server" ${_ninfer_apps_default})
+option(NINFER_BUILD_WINDOWS_TEXT "Build the native Windows text-only CLI" OFF)
+option(NINFER_BUILD_WINDOWS_SERVE "Build the native Windows text-only HTTP server" OFF)
+if(NINFER_BUILD_WINDOWS_TEXT AND NOT WIN32)
+  message(FATAL_ERROR "NINFER_BUILD_WINDOWS_TEXT is available only on Windows")
+endif()
+if(NINFER_BUILD_WINDOWS_SERVE AND NOT WIN32)
+  message(FATAL_ERROR "NINFER_BUILD_WINDOWS_SERVE is available only on Windows")
+endif()
 option(BUILD_TESTING "Build NInfer tests" OFF)
 option(NINFER_BUILD_BENCHMARKS "Build NInfer benchmarks" OFF)
+if(NINFER_BUILD_WINDOWS_SERVE AND (NINFER_BUILD_APPS OR BUILD_TESTING))
+  message(FATAL_ERROR
+    "NINFER_BUILD_WINDOWS_SERVE is a text-only Windows target; disable NINFER_BUILD_APPS and BUILD_TESTING")
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -89,26 +118,35 @@ if(NINFER_BUILD_APPS OR BUILD_TESTING)
   set(NINFER_BUILD_MEDIA_ACQUIRE ON)
 endif()
 
+set(NINFER_BUILD_MEDIA_DECODE OFF)
+if(NINFER_BUILD_APPS OR BUILD_TESTING)
+  set(NINFER_BUILD_MEDIA_DECODE ON)
+endif()
+
 set(NINFER_BUILD_PROMPT_INPUT OFF)
 if(NINFER_BUILD_APPS OR BUILD_TESTING)
   set(NINFER_BUILD_PROMPT_INPUT ON)
 endif()
 
 set(NINFER_BUILD_SERVE OFF)
-if(NINFER_BUILD_APPS OR BUILD_TESTING)
+if(NINFER_BUILD_APPS OR BUILD_TESTING OR NINFER_BUILD_WINDOWS_SERVE)
   set(NINFER_BUILD_SERVE ON)
 endif()
 
 find_package(CUDAToolkit REQUIRED)
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
-  libavformat>=60 libavcodec>=60 libavutil>=58 libswscale>=7)
+if(NINFER_BUILD_MEDIA_DECODE OR NINFER_BUILD_MEDIA_ACQUIRE)
+  find_package(PkgConfig REQUIRED)
+endif()
+if(NINFER_BUILD_MEDIA_DECODE)
+  pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
+    libavformat>=60 libavcodec>=60 libavutil>=58 libswscale>=7)
+endif()
 if(NINFER_BUILD_MEDIA_ACQUIRE)
   pkg_check_modules(LIBCURL REQUIRED IMPORTED_TARGET libcurl>=7.85)
 endif()
 find_package(Threads REQUIRED)
 
-if(NINFER_BUILD_APPS OR BUILD_TESTING)
+if(NINFER_BUILD_APPS OR BUILD_TESTING OR NINFER_BUILD_WINDOWS_SERVE)
   # Product operational logging is an offline, repository-pinned dependency. Core-only builds do
   # not configure or link it.
   add_subdirectory(third_party/spdlog)
@@ -118,6 +156,12 @@ endif()
 add_subdirectory(src)
 if(NINFER_BUILD_APPS)
   add_subdirectory(apps)
+endif()
+if(NINFER_BUILD_WINDOWS_TEXT)
+  add_subdirectory(apps/windows-text)
+endif()
+if(NINFER_BUILD_WINDOWS_SERVE)
+  add_subdirectory(apps/windows-serve)
 endif()
 if(BUILD_TESTING)
   enable_testing()

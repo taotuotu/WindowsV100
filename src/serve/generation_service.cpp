@@ -1,3 +1,4 @@
+// Modified for the Windows/V100 port by taotuotu, 2026; see NOTICE.
 #include "serve/generation_service.h"
 
 #include "product/media_acquire/acquire.h"
@@ -6,6 +7,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
+#include <filesystem>
 #include <iterator>
 #include <mutex>
 #include <stdexcept>
@@ -232,8 +234,14 @@ private:
 
 GenerationService::GenerationService(ServeOptions options, StartupObserver startup_observer)
     : options_(std::move(options)) {
+#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+    if (options_.enable_vision) {
+        throw std::invalid_argument(
+            "Vision is unavailable in this text-only Windows server build");
+    }
+#endif
     ninfer::EngineOptions engine_options;
-    engine_options.artifact_path            = options_.artifact_path;
+    engine_options.artifact_path            = std::filesystem::u8path(options_.artifact_path);
     engine_options.device                   = options_.device;
     engine_options.max_context              = options_.max_context;
     engine_options.kv_capacity              = options_.kv_capacity;

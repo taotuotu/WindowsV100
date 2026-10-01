@@ -1,0 +1,11 @@
+NInfer Windows V100
+
+The engine originates in Neroued/NInfer (https://github.com/Neroued/NInfer).
+This repository is derived from the NInfer V100 source repository at
+https://github.com/geoffwatts/ninfer-v100, based on revision
+b37d0dd3e1163b9d802d8bccfa89918bf68d793e.
+
+The Windows/V100 port and browser UI changes in this derivative are attributed
+to taotuotu, 2026. Existing upstream copyright and license notices remain with
+their source files. The project license is in LICENSE; notices for bundled
+third-party components are in THIRD_PARTY_NOTICES.md and licenses/.

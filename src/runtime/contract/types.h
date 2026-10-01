@@ -1,3 +1,4 @@
+// Modified for the Windows/V100 port by taotuotu, 2026; see NOTICE.
 #pragma once
 
 #include "core/nvtx.h"
@@ -244,15 +245,24 @@ struct PrefillWork {
     result.tokens                       = suffix_tokens;
     result.vision_items                 = vision_items;
     result.vision_patches               = vision_patches;
-    const unsigned __int128 suffix      = suffix_tokens;
-    const unsigned __int128 linear      = static_cast<unsigned __int128>(prefix_tokens) * suffix;
-    const unsigned __int128 triangular  = suffix * (suffix + 1U) / 2U;
-    constexpr unsigned __int128 maximum = ~static_cast<unsigned __int128>(0);
-    const unsigned __int128 attention =
-        triangular > maximum - linear ? maximum : linear + triangular;
-    result.attention_pairs = attention > std::numeric_limits<std::uint64_t>::max()
-                                 ? std::numeric_limits<std::uint64_t>::max()
-                                 : static_cast<std::uint64_t>(attention);
+    const auto saturating_product = [](std::uint64_t left, std::uint64_t right) noexcept {
+        constexpr std::uint64_t maximum = std::numeric_limits<std::uint64_t>::max();
+        return left != 0 && right > maximum / left ? maximum : left * right;
+    };
+    const auto saturating_add = [](std::uint64_t left, std::uint64_t right) noexcept {
+        constexpr std::uint64_t maximum = std::numeric_limits<std::uint64_t>::max();
+        return right > maximum - left ? maximum : left + right;
+    };
+    const std::uint64_t linear = saturating_product(prefix_tokens, suffix_tokens);
+    // Divide the even factor first. This preserves exact triangular numbers without an
+    // overflowing suffix+1 when suffix_tokens is UINT64_MAX.
+    const bool suffix_is_odd = (suffix_tokens & 1U) != 0;
+    const std::uint64_t triangular_left = suffix_is_odd ? suffix_tokens : suffix_tokens / 2U;
+    const std::uint64_t triangular_right =
+        suffix_is_odd ? suffix_tokens / 2U + 1U : suffix_tokens + 1U;
+    const std::uint64_t triangular =
+        saturating_product(triangular_left, triangular_right);
+    result.attention_pairs = saturating_add(linear, triangular);
     return result;
 }
 

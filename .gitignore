@@ -1,3 +1,4 @@
+# Modified for the Windows/V100 port by taotuotu, 2026; see NOTICE.
 # Build
 build/
 build-*/
@@ -42,6 +43,9 @@ out/
 /tmp-*/
 /AGENTS.override.md
 /logs/
+/results/
+/dist/
+*.requests.jsonl
 *.log
 *.tmp
 /core

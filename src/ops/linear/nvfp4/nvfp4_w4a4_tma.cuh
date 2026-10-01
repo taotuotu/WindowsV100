@@ -1,3 +1,4 @@
+// Modified for the Windows/V100 port by taotuotu, 2026; see NOTICE.
 #pragma once
 
 #include "ops/common/mbarrier.cuh"
@@ -15,7 +16,7 @@
 
 namespace ninfer::ops::detail {
 
-struct alignas(128) Nvfp4W4a4TmaDescriptors {
+struct NINFER_TMA_DESCRIPTOR_ALIGN Nvfp4W4a4TmaDescriptors {
     CUtensorMap a_codes;
     CUtensorMap b_codes;
     CUtensorMap a_scales;
@@ -179,8 +180,9 @@ __device__ __forceinline__ void nvfp4_tma_load_2d(void*, const CUtensorMap*, std
 template <class Geometry, class Schedule, class Epilogue, class OutputPolicy>
 __global__
 __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void nvfp4_w4a4_tma_kernel(
-    const __grid_constant__ Nvfp4W4a4TmaDescriptors descriptors, float alpha,
-    const __grid_constant__ Epilogue epilogue, const __grid_constant__ OutputPolicy output) {
+    const NINFER_TMA_GRID_CONSTANT Nvfp4W4a4TmaDescriptors descriptors, float alpha,
+    const NINFER_TMA_GRID_CONSTANT Epilogue epilogue,
+    const NINFER_TMA_GRID_CONSTANT OutputPolicy output) {
 #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
     static_assert((Geometry::kInputRows % Schedule::kBlockK) == 0);
     static_assert((Geometry::kOutputRows % Schedule::kBlockN) == 0);

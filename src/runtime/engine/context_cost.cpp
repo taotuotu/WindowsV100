@@ -1,3 +1,4 @@
+// Modified for the Windows/V100 port by taotuotu, 2026; see NOTICE.
 #include "runtime/engine/context_cost.h"
 
 #include <nlohmann/json.hpp>
@@ -12,7 +13,17 @@
 #include <system_error>
 #include <utility>
 
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
 #include <unistd.h>
+#endif
 
 namespace ninfer::runtime {
 
@@ -23,7 +34,34 @@ const std::vector<ContextCostMachinePreset>& compiled_context_cost_defaults();
 namespace {
 
 using Json = nlohmann::json;
-using U128 = unsigned __int128;
+
+struct WideProduct {
+    std::uint64_t high;
+    std::uint64_t low;
+};
+
+// Exact 64x64 -> 128 multiplication without compiler-specific integer types. The 32-bit limbs
+// keep every intermediate within uint64_t and preserve the arithmetic used by Q32 pricing.
+WideProduct multiply_wide(std::uint64_t left, std::uint64_t right) noexcept {
+    constexpr std::uint64_t kLimbMask = 0xFFFFFFFFULL;
+    const std::uint64_t left_low     = left & kLimbMask;
+    const std::uint64_t left_high    = left >> 32U;
+    const std::uint64_t right_low    = right & kLimbMask;
+    const std::uint64_t right_high   = right >> 32U;
+
+    std::uint64_t product = left_low * right_low;
+    const std::uint64_t low_limb = product & kLimbMask;
+    std::uint64_t carry = product >> 32U;
+
+    product = left_high * right_low + carry;
+    const std::uint64_t middle_limb = product & kLimbMask;
+    const std::uint64_t high_limb = product >> 32U;
+
+    product = left_low * right_high + middle_limb;
+    const std::uint64_t high = left_high * right_high + high_limb + (product >> 32U);
+    const std::uint64_t low = (product << 32U) | low_limb;
+    return {high, low};
+}
 
 constexpr std::size_t direction_index(ContextTransferDirection direction) noexcept {
     return static_cast<std::size_t>(direction);
@@ -36,18 +74,55 @@ std::uint64_t saturating_add(std::uint64_t left, std::uint64_t right) noexcept {
 }
 
 std::uint64_t saturating_product(std::uint64_t left, std::uint64_t right) noexcept {
-    const U128 product = static_cast<U128>(left) * right;
-    return product > std::numeric_limits<std::uint64_t>::max()
+    return left != 0 && right > std::numeric_limits<std::uint64_t>::max() / left
                ? std::numeric_limits<std::uint64_t>::max()
-               : static_cast<std::uint64_t>(product);
+               : left * right;
 }
 
 std::uint64_t q32_product_ns(std::uint64_t coefficient, std::uint64_t units) noexcept {
     if (coefficient == 0 || units == 0) { return 0; }
-    const U128 product        = static_cast<U128>(coefficient) * units;
-    const U128 maximum_scaled = static_cast<U128>(std::numeric_limits<std::uint64_t>::max()) << 32U;
-    if (product >= maximum_scaled) { return std::numeric_limits<std::uint64_t>::max(); }
-    return static_cast<std::uint64_t>((product + kContextCostQ32One - 1U) >> 32U);
+    const WideProduct product = multiply_wide(coefficient, units);
+    constexpr std::uint64_t kMaximumScaledHigh = 0x00000000FFFFFFFFULL;
+    constexpr std::uint64_t kMaximumScaledLow  = 0xFFFFFFFF00000000ULL;
+    if (product.high > kMaximumScaledHigh ||
+        (product.high == kMaximumScaledHigh && product.low >= kMaximumScaledLow)) {
+        return std::numeric_limits<std::uint64_t>::max();
+    }
+
+    const std::uint64_t whole = (product.high << 32U) | (product.low >> 32U);
+    const bool has_fraction = (product.low & (kContextCostQ32One - 1U)) != 0;
+    return whole + static_cast<std::uint64_t>(has_fraction);
+}
+
+std::uint64_t process_id_for_temporary_name() noexcept {
+#if defined(_WIN32)
+    return static_cast<std::uint64_t>(::GetCurrentProcessId());
+#else
+    return static_cast<std::uint64_t>(::getpid());
+#endif
+}
+
+std::string path_for_error(const std::filesystem::path& path) {
+#if defined(_WIN32)
+    const auto utf8 = path.u8string();
+    return std::string(reinterpret_cast<const char*>(utf8.data()), utf8.size());
+#else
+    return path.string();
+#endif
+}
+
+void rename_replace(const std::filesystem::path& temporary,
+                    const std::filesystem::path& destination) {
+#if defined(_WIN32)
+    if (!::MoveFileExW(temporary.c_str(), destination.c_str(),
+                       MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        const DWORD error = ::GetLastError();
+        throw std::system_error(static_cast<int>(error), std::system_category(),
+                                "MoveFileExW " + path_for_error(destination));
+    }
+#else
+    std::filesystem::rename(temporary, destination);
+#endif
 }
 
 void require_object(const Json& value, std::string_view context) {
@@ -296,22 +371,22 @@ void write_document_atomic(const std::filesystem::path& path, const Json& docume
     if (!path.parent_path().empty()) { std::filesystem::create_directories(path.parent_path()); }
 
     std::filesystem::path temporary = path;
-    temporary += ".tmp." + std::to_string(static_cast<long long>(::getpid())) + "." +
+    temporary += ".tmp." + std::to_string(process_id_for_temporary_name()) + "." +
                  std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
     try {
         {
             std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
             if (!output) {
                 throw std::runtime_error("failed to open temporary context-cost preset: " +
-                                         temporary.string());
+                                         path_for_error(temporary));
             }
             output.write(serialized.data(), static_cast<std::streamsize>(serialized.size()));
             if (!output) {
                 throw std::runtime_error("failed to write temporary context-cost preset: " +
-                                         temporary.string());
+                                         path_for_error(temporary));
             }
         }
-        std::filesystem::rename(temporary, path);
+        rename_replace(temporary, path);
     } catch (...) {
         std::error_code ignored;
         std::filesystem::remove(temporary, ignored);

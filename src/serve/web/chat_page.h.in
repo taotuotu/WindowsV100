@@ -1,0 +1,10 @@
+#pragma once
+
+#include <string_view>
+
+namespace ninfer::serve::web {
+
+inline constexpr std::string_view kChatPageHtml =
+    R"NINFERCHAT(@NINFER_WINDOWS_CHAT_PAGE_HTML_CHUNKS@)NINFERCHAT";
+
+} // namespace ninfer::serve::web

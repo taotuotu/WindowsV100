@@ -1,3 +1,4 @@
+// Modified for the Windows/V100 port by taotuotu, 2026; see NOTICE.
 #include "artifact/reader.h"
 
 #include <nlohmann/json.hpp>
@@ -15,10 +16,20 @@
 #include <unordered_map>
 #include <utility>
 
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#endif
 
 namespace ninfer::artifact {
 namespace {
@@ -31,6 +42,22 @@ constexpr std::array<std::byte, 8> kMagic = {
 };
 constexpr std::uint64_t kPrefixBytes      = 16;
 constexpr std::uint64_t kPayloadAlignment = 4096;
+
+std::string path_for_error(const std::filesystem::path& path) {
+#if defined(_WIN32)
+    const auto utf8 = path.u8string();
+    return std::string(reinterpret_cast<const char*>(utf8.data()), utf8.size());
+#else
+    return path.string();
+#endif
+}
+
+#if defined(_WIN32)
+[[noreturn]] void throw_windows_error(DWORD error, std::string operation) {
+    throw std::system_error(static_cast<int>(error), std::system_category(),
+                            std::move(operation));
+}
+#endif
 
 std::uint64_t checked_add(std::uint64_t a, std::uint64_t b, std::string_view label) {
     if (b > std::numeric_limits<std::uint64_t>::max() - a) {
@@ -177,9 +204,61 @@ struct TransparentStringHash {
 class MappedFile {
 public:
     explicit MappedFile(const std::filesystem::path& path) {
+#if defined(_WIN32)
+        const std::string display_path = path_for_error(path);
+        file_ = ::CreateFileW(path.c_str(), GENERIC_READ,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_RANDOM_ACCESS,
+                              nullptr);
+        if (file_ == INVALID_HANDLE_VALUE) {
+            const DWORD error = ::GetLastError();
+            file_ = INVALID_HANDLE_VALUE;
+            throw_windows_error(error, "CreateFileW " + display_path);
+        }
+
+        try {
+            LARGE_INTEGER status{};
+            if (!::GetFileSizeEx(file_, &status)) {
+                throw_windows_error(::GetLastError(), "GetFileSizeEx " + display_path);
+            }
+            if (status.QuadPart < 0 ||
+                static_cast<std::uint64_t>(status.QuadPart) >
+                    static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+                throw ArtifactError("artifact size does not fit the process address space");
+            }
+            size_ = static_cast<std::size_t>(status.QuadPart);
+
+            if (size_ != 0) {
+                mapping_ = ::CreateFileMappingW(file_, nullptr, PAGE_READONLY, 0, 0, nullptr);
+                if (mapping_ == nullptr) {
+                    throw_windows_error(::GetLastError(), "CreateFileMappingW " + display_path);
+                }
+                data_ = static_cast<const std::byte*>(
+                    ::MapViewOfFile(mapping_, FILE_MAP_READ, 0, 0, size_));
+                if (data_ == nullptr) {
+                    throw_windows_error(::GetLastError(), "MapViewOfFile " + display_path);
+                }
+            }
+
+            direct_file_ = ::CreateFileW(path.c_str(), GENERIC_READ,
+                                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                         nullptr, OPEN_EXISTING,
+                                         FILE_ATTRIBUTE_NORMAL | FILE_FLAG_NO_BUFFERING |
+                                             FILE_FLAG_OVERLAPPED,
+                                         nullptr);
+            if (direct_file_ == INVALID_HANDLE_VALUE) {
+                const DWORD error = ::GetLastError();
+                direct_file_ = INVALID_HANDLE_VALUE;
+                throw_windows_error(error, "CreateFileW (unbuffered) " + display_path);
+            }
+        } catch (...) {
+            close_handles();
+            throw;
+        }
+#else
         const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_DIRECT);
         if (fd < 0) {
-            throw std::system_error(errno, std::generic_category(), "open " + path.string());
+            throw std::system_error(errno, std::generic_category(), "open " + path_for_error(path));
         }
 
         struct stat status {};
@@ -187,7 +266,7 @@ public:
         if (::fstat(fd, &status) != 0) {
             const int error = errno;
             ::close(fd);
-            throw std::system_error(error, std::generic_category(), "fstat " + path.string());
+            throw std::system_error(error, std::generic_category(), "fstat " + path_for_error(path));
         }
         if (status.st_size < 0 ||
             static_cast<std::uintmax_t>(status.st_size) > std::numeric_limits<std::size_t>::max()) {
@@ -202,17 +281,22 @@ public:
             if (mapping == MAP_FAILED) {
                 const int error = errno;
                 ::close(fd);
-                throw std::system_error(error, std::generic_category(), "mmap " + path.string());
+                throw std::system_error(error, std::generic_category(), "mmap " + path_for_error(path));
             }
         }
         fd_   = fd;
         data_ = static_cast<const std::byte*>(mapping);
         size_ = size;
+#endif
     }
 
     ~MappedFile() {
+#if defined(_WIN32)
+        close_handles();
+#else
         if (data_ != nullptr) { ::munmap(const_cast<std::byte*>(data_), size_); }
         if (fd_ >= 0) { ::close(fd_); }
+#endif
     }
 
     MappedFile(const MappedFile&)            = delete;
@@ -225,13 +309,65 @@ public:
     std::size_t read_direct(std::uint64_t absolute_offset, std::span<std::byte> destination) const {
         constexpr std::size_t alignment = Reader::direct_io_alignment;
         if (absolute_offset % alignment != 0 || destination.size() % alignment != 0 ||
-            reinterpret_cast<std::uintptr_t>(destination.data()) % alignment != 0) {
+            (!destination.empty() &&
+             reinterpret_cast<std::uintptr_t>(destination.data()) % alignment != 0)) {
             throw ArtifactError("direct artifact read is not 4096-byte aligned");
         }
+#if defined(_WIN32)
+        if (absolute_offset > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) ||
+            destination.size() > std::numeric_limits<std::uint64_t>::max() - absolute_offset) {
+            throw ArtifactError("direct artifact read exceeds platform I/O limits");
+        }
+        if (destination.empty()) { return 0; }
+
+        HANDLE event = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        if (event == nullptr) {
+            throw_windows_error(::GetLastError(), "CreateEventW for direct artifact read");
+        }
+        struct EventGuard {
+            HANDLE value;
+            ~EventGuard() { if (value != nullptr) { ::CloseHandle(value); } }
+        } event_guard{event};
+
+        constexpr std::size_t max_chunk =
+            (static_cast<std::size_t>(std::numeric_limits<DWORD>::max()) / alignment) * alignment;
+        std::size_t total = 0;
+        while (total < destination.size()) {
+            const std::size_t request = std::min(max_chunk, destination.size() - total);
+            OVERLAPPED overlapped{};
+            overlapped.Offset = static_cast<DWORD>(absolute_offset + total);
+            overlapped.OffsetHigh = static_cast<DWORD>((absolute_offset + total) >> 32U);
+            overlapped.hEvent = event;
+            if (!::ResetEvent(event)) {
+                throw_windows_error(::GetLastError(), "ResetEvent for direct artifact read");
+            }
+
+            DWORD transferred = 0;
+            const BOOL completed = ::ReadFile(direct_file_, destination.data() + total,
+                                              static_cast<DWORD>(request), &transferred,
+                                              &overlapped);
+            if (!completed) {
+                const DWORD error = ::GetLastError();
+                if (error == ERROR_HANDLE_EOF) { break; }
+                if (error != ERROR_IO_PENDING) {
+                    throw_windows_error(error, "ReadFile direct artifact read");
+                }
+                if (!::GetOverlappedResult(direct_file_, &overlapped, &transferred, TRUE)) {
+                    const DWORD completion_error = ::GetLastError();
+                    if (completion_error == ERROR_HANDLE_EOF) { break; }
+                    throw_windows_error(completion_error, "GetOverlappedResult direct artifact read");
+                }
+            }
+            total += transferred;
+            if (transferred < request) { break; }
+        }
+        return total;
+#else
         if (absolute_offset > static_cast<std::uint64_t>(std::numeric_limits<off_t>::max()) ||
             destination.size() > static_cast<std::size_t>(std::numeric_limits<ssize_t>::max())) {
             throw ArtifactError("direct artifact read exceeds platform I/O limits");
         }
+        if (destination.empty()) { return 0; }
 
         ssize_t bytes = -1;
         do {
@@ -242,10 +378,36 @@ public:
             throw std::system_error(errno, std::generic_category(), "direct artifact read");
         }
         return static_cast<std::size_t>(bytes);
+#endif
     }
 
 private:
+#if defined(_WIN32)
+    void close_handles() noexcept {
+        if (data_ != nullptr) {
+            ::UnmapViewOfFile(data_);
+            data_ = nullptr;
+        }
+        if (mapping_ != nullptr) {
+            ::CloseHandle(mapping_);
+            mapping_ = nullptr;
+        }
+        if (direct_file_ != INVALID_HANDLE_VALUE) {
+            ::CloseHandle(direct_file_);
+            direct_file_ = INVALID_HANDLE_VALUE;
+        }
+        if (file_ != INVALID_HANDLE_VALUE) {
+            ::CloseHandle(file_);
+            file_ = INVALID_HANDLE_VALUE;
+        }
+    }
+
+    HANDLE file_        = INVALID_HANDLE_VALUE;
+    HANDLE mapping_     = nullptr;
+    HANDLE direct_file_ = INVALID_HANDLE_VALUE;
+#else
     int fd_                = -1;
+#endif
     const std::byte* data_ = nullptr;
     std::size_t size_      = 0;
 };

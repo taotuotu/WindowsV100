@@ -1,7 +1,25 @@
+<!-- Modified for the Windows/V100 port by taotuotu, 2026; see NOTICE. -->
 # HTTP serving
 
 `build/apps/ninfer-serve` loads one registered artifact and exposes OpenAI- and
 Anthropic-compatible HTTP endpoints over one resident NInfer Engine.
+
+For the local Windows/V100 text-only target, build and launch `ninfer-windows-serve` as described in
+[Windows/V100](windows-v100.md). Its public defaults are alias `qwen3.8-27b`, port 8110, context/KV
+capacity 8192, automatic 32GB SM70 device selection, BF16 KV, MTP3, and one active request. Personal
+settings may override these through `.local/windows-server.psd1`. Vision/media acquisition is unavailable in that
+build; the text protocol contracts below use the same serving adapters.
+
+That Windows target also serves its embedded browser chat page at `GET /`. It can be loaded before
+entering an optional API key; API requests still use the configured authentication policy. The page
+uses the existing Chat Completions stream with `timings_per_token`, `return_progress`, and usage
+enabled. It displays server decode timing separately from client time to first text and keeps chat
+history only in browser page memory. Source and launch instructions are in the Windows guide.
+
+`GET /ui/model-info` is a Windows UI metadata endpoint, protected by the configured API key. It
+reports the resident Engine's canonical model/weights IDs, artifact basename, KV storage,
+speculation, context capacity, device ordinal, and prefix-reuse setting. It does not change the
+OpenAI public model alias or `/v1/models` schema and returns 503 when the service is unavailable.
 
 ## Start the server
 

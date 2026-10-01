@@ -1,14 +1,20 @@
+// Modified for the Windows/V100 port by taotuotu, 2026; see NOTICE.
 #include "serve/http_server.h"
 
 #include "serve/anthropic_messages.h"
 #include "serve/http_transport.h"
 #include "serve/openai_common.h"
 #include "serve/request_log.h"
+#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+#include "product/speculative_options.h"
+#include "serve/web/chat_page.h"
+#endif
 
 #include <nlohmann/json.hpp>
 
 #include <chrono>
 #include <exception>
+#include <filesystem>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -31,6 +37,39 @@ bool is_anthropic_path(std::string_view path) { return path.starts_with("/v1/mes
 bool is_openai_path(std::string_view path) {
     return path.starts_with("/v1/") && !is_anthropic_path(path);
 }
+
+#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+const char* kv_dtype_name(ninfer::KvCacheStorage storage) noexcept {
+    switch (storage) {
+    case ninfer::KvCacheStorage::BFloat16:
+        return "bf16";
+    case ninfer::KvCacheStorage::Int8Group64:
+        return "int8";
+    case ninfer::KvCacheStorage::Fp8E4M3Row256:
+        return "fp8";
+    case ninfer::KvCacheStorage::Nvfp4Group16:
+        return "nvfp4";
+    case ninfer::KvCacheStorage::Fp8KeyNvfp4Value:
+        return "k8v4";
+    }
+    return "unknown";
+}
+
+const char* proposal_head_name(ninfer::ProposalHead proposal_head) noexcept {
+    switch (proposal_head) {
+    case ninfer::ProposalHead::Full:
+        return "full";
+    case ninfer::ProposalHead::Optimized:
+        return "optimized";
+    }
+    return "unknown";
+}
+
+std::string utf8_basename(const std::filesystem::path& path) {
+    const std::u8string basename = path.filename().u8string();
+    return std::string(reinterpret_cast<const char*>(basename.data()), basename.size());
+}
+#endif
 
 void ensure_openai_request_id(const httplib::Request& request, httplib::Response& response) {
     if (is_openai_path(request.path) && !response.has_header("x-request-id")) {
@@ -352,7 +391,12 @@ void HttpServer::register_routes() {
 
     server_.set_pre_routing_handler([this](const httplib::Request& req, httplib::Response& res) {
         ensure_openai_request_id(req, res);
+#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+        if (options_.api_key.empty() || (req.path == "/" && req.method == "GET") ||
+            req.path == "/health" || req.method == "OPTIONS") {
+#else
         if (options_.api_key.empty() || req.path == "/health" || req.method == "OPTIONS") {
+#endif
             return httplib::Server::HandlerResponse::Unhandled;
         }
         // Accept both the OpenAI-style bearer token and the Anthropic-style
@@ -431,6 +475,41 @@ void HttpServer::register_routes() {
         res.set_content(nlohmann::json{{"status", available ? "ok" : "unavailable"}}.dump(),
                         "application/json");
     });
+#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+    server_.Get("/", [](const httplib::Request&, httplib::Response& res) {
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(web::kChatPageHtml.data(), web::kChatPageHtml.size(),
+                        "text/html; charset=utf-8");
+    });
+    server_.Get("/ui/model-info", [this](const httplib::Request&, httplib::Response& res) {
+        if (service_ == nullptr || !service_->is_available()) {
+            res.status = 503;
+            res.set_content(nlohmann::json{{"status", "unavailable"}}.dump(),
+                            "application/json");
+            return;
+        }
+
+        const ninfer::LoadSummary load = service_->load_summary();
+        const ninfer::EngineOptions& engine = service_->engine_options();
+        const std::string artifact_file = utf8_basename(engine.artifact_path);
+        const ninfer::SpeculativeOptions& speculative = engine.speculative;
+        const nlohmann::json info{
+            {"api_model_id", public_model_id_},
+            {"model_id", load.model_id},
+            {"weights_id", load.weights_id},
+            {"artifact_file", artifact_file},
+            {"kv_dtype", kv_dtype_name(engine.kv_cache)},
+            {"max_context", engine.max_context},
+            {"device", engine.device},
+            {"speculative_backend", product::speculative_backend_name(speculative.backend)},
+            {"draft_tokens", speculative.draft_tokens},
+            {"proposal_head", proposal_head_name(speculative.proposal_head)},
+            {"prefix_reuse", service_->options().allow_prefix_reuse},
+        };
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(info.dump(), "application/json");
+    });
+#endif
     server_.Get("/v1/models", [this](const httplib::Request& req, httplib::Response& res) {
         handle_models(req, res);
     });
