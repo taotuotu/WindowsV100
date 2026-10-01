@@ -26,7 +26,7 @@ struct RequestCapacity {
     std::size_t active = 0;
     const std::size_t maximum;
     std::atomic<bool> stopping{false};
-#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+#if defined(NINFER_WINDOWS_SERVE)
     std::string cache_session;
     std::string cache_owner = "none";
     std::uint64_t cache_switch_count = 0;
@@ -103,7 +103,7 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
-#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+#if defined(NINFER_WINDOWS_SERVE)
 // An ownership hint for clients without a session header; never a proof of prefix identity.
 std::string automatic_session_key(const GenerationRequest& request) {
     std::uint64_t digest = 14695981039346656037ULL;
@@ -265,13 +265,9 @@ private:
 
 GenerationService::GenerationService(ServeOptions options, StartupObserver startup_observer)
     : options_(std::move(options)) {
-#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+#if defined(NINFER_WINDOWS_SERVE)
     if (options_.max_concurrency != 1) {
         throw std::invalid_argument("the Windows server accepts one inference request at a time");
-    }
-    if (options_.enable_vision) {
-        throw std::invalid_argument(
-            "Vision is unavailable in this text-only Windows server build");
     }
 #endif
     ninfer::EngineOptions engine_options;
@@ -296,7 +292,7 @@ GenerationService::GenerationService(ServeOptions options, StartupObserver start
     engine_              = std::make_unique<ninfer::Engine>(std::move(engine_options));
     prompt_capabilities_ = engine_->prompt_capabilities();
     request_capacity_    = std::make_shared<RequestCapacity>(
-#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+#if defined(NINFER_WINDOWS_SERVE)
         1);
 #else
         static_cast<std::size_t>(options_.max_concurrency) + options_.max_pending_requests);
@@ -313,7 +309,7 @@ GenerationService::acquire_request_lifetime(DeadlinePolicy deadline_policy) cons
                                                      "inference service is shutting down"));
         }
         if (request_capacity_->active >= request_capacity_->maximum) {
-#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+#if defined(NINFER_WINDOWS_SERVE)
             ApiError error;
             error.status = 429;
             error.type = "rate_limit_error";
@@ -368,6 +364,16 @@ PreparedRequest GenerationService::prepare_impl(const GenerationRequest& request
     prepared.effective_reasoning_effort = semantics.effective_reasoning_effort;
     prepared.preserve_thinking          = semantics.preserve_thinking;
     const bool request_has_media        = request.media_item_count() != 0;
+#if defined(NINFER_WINDOWS_SERVE)
+    for (const ChatTurn& turn : request.messages) {
+        for (const ContentPart& part : turn.content) {
+            if (part.kind == ContentKind::Video) {
+                const std::invalid_argument error("video input is unavailable in this Windows image server");
+                throw_invalid_input(error, "video_not_supported");
+            }
+        }
+    }
+#endif
     if (request_has_media && !options_.enable_vision) {
         const std::invalid_argument error("Vision is disabled for this server");
         throw_invalid_input(error, "vision_disabled");
@@ -382,7 +388,7 @@ PreparedRequest GenerationService::prepare_impl(const GenerationRequest& request
 
     try {
         check_preparation_control(prepared.lifetime->deadline, is_cancelled);
-#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+#if defined(NINFER_WINDOWS_SERVE)
         if (cache_participation == CacheParticipation::ReadWrite) {
             if (!context_cache.session_key) {
                 context_cache.session_key = automatic_session_key(request);
@@ -408,7 +414,7 @@ PreparedRequest GenerationService::prepare_impl(const GenerationRequest& request
         input.context_cache.allow_engine_automatic_shared_prefixes =
             input.context_cache.allow_engine_automatic_shared_prefixes &&
             protocol_allows_engine_automatic;
-#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+#if defined(NINFER_WINDOWS_SERVE)
         // Actively maintain this owner's shared frontier. Explicit-disabled writes remain
         // absent; exact matching and physical feasibility remain Engine policy.
         for (PromptCacheMarker& marker : input.context_cache.markers) {
@@ -427,7 +433,7 @@ PreparedRequest GenerationService::prepare_impl(const GenerationRequest& request
         };
         ninfer::PreparedPrompt prompt = engine_->prepare(std::move(input), control);
         check_preparation_control(prepared.lifetime->deadline, is_cancelled);
-#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+#if defined(NINFER_WINDOWS_SERVE)
         if (cache_participation == CacheParticipation::ReadWrite && requested_session) {
             bool changed = false;
             {
@@ -466,6 +472,16 @@ PreparedRequest GenerationService::prepare_impl(const GenerationRequest& request
 int GenerationService::count_prompt_tokens(const GenerationRequest& request,
                                            std::function<bool()> is_cancelled) const {
     const bool request_has_media = request.media_item_count() != 0;
+#if defined(NINFER_WINDOWS_SERVE)
+    for (const ChatTurn& turn : request.messages) {
+        for (const ContentPart& part : turn.content) {
+            if (part.kind == ContentKind::Video) {
+                const std::invalid_argument error("video input is unavailable in this Windows image server");
+                throw_invalid_input(error, "video_not_supported");
+            }
+        }
+    }
+#endif
     if (request_has_media && !options_.enable_vision) {
         const std::invalid_argument error("Vision is disabled for this server");
         throw_invalid_input(error, "vision_disabled");
@@ -556,7 +572,7 @@ void GenerationService::request_shutdown() noexcept {
     request_capacity_->stopping.store(true, std::memory_order_release);
 }
 
-#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+#if defined(NINFER_WINDOWS_SERVE)
 ContextSessionInfo GenerationService::context_session_info() const {
     std::lock_guard lock(request_capacity_->mutex);
     return {.busy = request_capacity_->active != 0,

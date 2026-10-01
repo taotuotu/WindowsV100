@@ -12,7 +12,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
-#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+#if defined(NINFER_WINDOWS_SERVE)
 #include <cstddef>
 #include <deque>
 #include <optional>
@@ -103,7 +103,7 @@ private:
     void stop_stats_reporter();
     [[nodiscard]] ContextCacheHints request_cache_hints(
         const httplib::Request& req, ContextCacheHints hints = {}) const;
-#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+#if defined(NINFER_WINDOWS_SERVE)
     void handle_ui_metrics(const httplib::Request& req, httplib::Response& res) const;
     void handle_ui_cache_clear(const httplib::Request& req, httplib::Response& res);
     void handle_ui_shutdown(const httplib::Request& req, httplib::Response& res);
@@ -140,7 +140,7 @@ private:
     std::thread stats_thread_;
     bool stats_stopping_ = false;
 
-#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+#if defined(NINFER_WINDOWS_SERVE)
     static constexpr std::size_t kUiRecentRequestLimit = 32;
     const std::chrono::steady_clock::time_point ui_server_started_at_ =
         std::chrono::steady_clock::now();

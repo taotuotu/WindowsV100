@@ -4,11 +4,14 @@
 `build/apps/ninfer-serve` loads one registered artifact and exposes OpenAI- and
 Anthropic-compatible HTTP endpoints over one resident NInfer Engine.
 
-For the local Windows/V100 text-only target, build and launch `ninfer-windows-serve` as described in
+For the local Windows/V100 target, build and launch `ninfer-windows-serve` as described in
 [Windows/V100](windows-v100.md). Its public defaults are alias `qwen3.8-27b`, port 8110, context/KV
 capacity 8192, automatic 32GB SM70 device selection, BF16 KV, MTP3, and one active request. Personal
-settings may override these through `.local/windows-server.psd1`. Vision/media acquisition is unavailable in that
-build; the text protocol contracts below use the same serving adapters.
+settings may override these through `.local/windows-server.psd1`. Add `--vision` (launcher
+`-Vision`) for PNG, JPEG, and BMP images. This build uses native WIC decoding and WinHTTP media
+acquisition; video, GIF, TIFF, and WebP are unsupported. Remote URLs require Windows 10 21H1 or
+newer for DNS pinning; base64 data URLs work without that additional requirement. The text and
+image protocol contracts below use the same serving adapters.
 
 That Windows target also serves its embedded browser chat page at `GET /`. It can be loaded before
 entering an optional API key; API requests still use the configured authentication policy. The page
@@ -18,7 +21,8 @@ history only in browser page memory. Source and launch instructions are in the W
 
 `GET /ui/model-info` is a Windows UI metadata endpoint, protected by the configured API key. It
 reports the resident Engine's canonical model/weights IDs, artifact basename, KV storage,
-speculation, context capacity, device ordinal, and prefix-reuse setting. It does not change the
+speculation, context capacity, device ordinal, prefix-reuse setting, `vision_enabled`,
+`image_formats` (PNG/JPEG/BMP), and `video_enabled:false`. It does not change the
 OpenAI public model alias or `/v1/models` schema and returns 503 when the service is unavailable.
 
 `GET /ui/metrics` is the Windows UI global speed endpoint under the same API-key policy. Schema
@@ -336,7 +340,8 @@ denominator is nonzero.
 
 ### Multimodal request
 
-Start the server with `--vision` before sending media:
+Start the server with `--vision` before sending media. The Windows target accepts images only,
+uses port 8110 by default, and exposes its active image capability at `/ui/model-info`:
 
 ```bash
 curl http://127.0.0.1:8080/v1/chat/completions \

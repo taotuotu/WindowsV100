@@ -22,7 +22,7 @@ namespace ninfer::serve {
 struct RequestLifetime;
 struct RequestCapacity;
 
-#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+#if defined(NINFER_WINDOWS_SERVE)
 struct ContextSessionInfo {
     bool busy = false;
     std::string owner = "none";
@@ -142,7 +142,7 @@ public:
 
     void warmup();
     void request_shutdown() noexcept;
-#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+#if defined(NINFER_WINDOWS_SERVE)
     [[nodiscard]] ContextSessionInfo context_session_info() const;
     void clear_context_cache() const;
 #endif

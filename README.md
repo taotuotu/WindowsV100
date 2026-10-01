@@ -9,7 +9,7 @@
 
 - **显卡：V100 32GB / 同类 SM70 Volta 32GB。** 当前 Windows 构建面向 `sm_70`；不提供 RTX 显卡兼容承诺。
 - **模型：固定的 Qwen3.8-27B mixed NVFP4/FP8 `.ninfer` v2**，约 23.72 GB。下载器固定 revision、大小和 SHA256；权重不随源码或程序 ZIP 分发。
-- **输入：文本与工具历史。** 常驻服务提供 OpenAI Chat Completions / Responses、Anthropic Messages 和流式输出；Windows 构建关闭图像、视频输入。
+- **输入：文本、工具历史与可选图像。** 服务提供 OpenAI Chat Completions / Responses、Anthropic Messages 和流式输出。Windows 通过 `-Vision` 接受 JPEG、PNG、BMP 图片；网页提供上传与预览，视频输入不支持。
 - **网页：** 多轮聊天、思考折叠、停止生成、完整模型标识、decode tok/s、首字延迟和缓存命中；全局速度面板同时监控其它平台的 API 生成调用。
 - **KV：** BF16 / INT8 / FP8；默认 BF16。MTP 默认 learned window 3、optimized proposal head，前缀复用默认开启。
 
@@ -26,7 +26,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\download-model.ps1
 .\start-ninfer.bat
 ```
 
-`start-ninfer.bat` 是一键入口：启动模型，等待健康状态和模型列表就绪，再自动打开 **http://127.0.0.1:8110/**。首次初始化可能需要几分钟，默认等待上限10分钟。已运行的同一服务会被复用；本次新启动的服务由启动窗口持有，Ctrl+C 或关闭窗口停止它。启动失败会保留报错窗口。`stop-ninfer.bat` 一键结束本仓库 `build*`、`bin`、`dist` 和 `.local` 下路径匹配的 NInfer server、text/CLI 与 perplexity 进程，包括尚未监听的初始化进程；`stop-ninfer.bat -List` 只列出候选而不停止。它只处理明确的 NInfer 可执行文件名和当前仓库路径内的程序。页面聊天只保存在内存里，刷新会清空。
+`start-ninfer.bat` 是一键入口：启动模型，等待健康状态和模型列表就绪，再自动打开 **http://127.0.0.1:8110/**。首次初始化可能需要几分钟，默认等待上限10分钟。已运行的同一服务会被复用；本次新启动的服务由启动窗口持有，Ctrl+C 或关闭窗口停止它。使用 `start-ninfer.bat -Vision` 启用图像识别；也可在 `.local/windows-server.psd1` 设置 `Vision = $true`。启动失败会保留报错窗口。`stop-ninfer.bat` 一键结束本仓库 `build*`、`bin`、`dist` 和 `.local` 下路径匹配的 NInfer server、text/CLI 与 perplexity 进程，包括尚未监听的初始化进程；`stop-ninfer.bat -List` 只列出候选而不停止。它只处理明确的 NInfer 可执行文件名和当前仓库路径内的程序。页面聊天只保存在内存里，刷新会清空。
 
 页面的“全局速度”每秒左右刷新，包含网页、ZCode 和其它平台的生成调用：服务总解码/预填充吞吐、运行/排队状态、累计解码和缓存命中、最近请求与速率趋势。实时吞吐是相邻服务快照之间的真实 token 增量/耗时，与单次回答的解码阶段平均速率分开显示；解码计数不含预填充产生的首 token。请求记录只有匿名计时与计数，服务重启后重置。
 

@@ -5,7 +5,7 @@
 #include "serve/http_transport.h"
 #include "serve/openai_common.h"
 #include "serve/request_log.h"
-#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+#if defined(NINFER_WINDOWS_SERVE)
 #include "product/speculative_options.h"
 #include "serve/web/chat_page.h"
 #endif
@@ -27,7 +27,7 @@
 namespace ninfer::serve {
 namespace {
 
-#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+#if defined(NINFER_WINDOWS_SERVE)
 void require_local_control(const httplib::Request& request) {
     const bool local = request.remote_addr == "127.0.0.1" || request.remote_addr == "::1" ||
                        request.remote_addr == "::ffff:127.0.0.1";
@@ -55,7 +55,7 @@ bool is_openai_path(std::string_view path) {
     return path.starts_with("/v1/") && !is_anthropic_path(path);
 }
 
-#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+#if defined(NINFER_WINDOWS_SERVE)
 const char* kv_dtype_name(ninfer::KvCacheStorage storage) noexcept {
     switch (storage) {
     case ninfer::KvCacheStorage::BFloat16:
@@ -274,7 +274,7 @@ HttpServer::HttpServer(ServeOptions options, std::shared_ptr<spdlog::logger> log
                                                             options_.response_store_max_bytes),
       operational_log_(logger),
       request_jsonl_(options_.request_log_jsonl, options_.artifact_path, std::move(logger)) {
-#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+#if defined(NINFER_WINDOWS_SERVE)
     ui_server_instance_id_ = "serve-ui-" + new_openai_request_id();
 #endif
     const std::size_t queued_requests =
@@ -314,7 +314,7 @@ std::shared_ptr<HttpServer::RequestLifecycle> HttpServer::begin_request(RequestL
     return std::make_shared<RequestLifecycle>(*this, std::move(context));
 }
 
-#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+#if defined(NINFER_WINDOWS_SERVE)
 std::uint64_t HttpServer::ui_uptime_ms() const noexcept {
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - ui_server_started_at_);
@@ -337,7 +337,7 @@ void HttpServer::trim_ui_request_history_locked() {
 #endif
 
 void HttpServer::record_request_start(const RequestLogContext& context) {
-#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+#if defined(NINFER_WINDOWS_SERVE)
     const std::string source = service_ ? service_->context_session_info().owner : "unknown";
     {
         std::lock_guard lock(ui_metrics_mutex_);
@@ -357,7 +357,7 @@ void HttpServer::record_request_start(const RequestLogContext& context) {
 }
 
 void HttpServer::record_request_rejected(const RequestRejectionLogContext& context) {
-#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+#if defined(NINFER_WINDOWS_SERVE)
     {
         std::lock_guard lock(ui_metrics_mutex_);
         ++ui_requests_started_;
@@ -378,7 +378,7 @@ void HttpServer::record_request_rejected(const RequestRejectionLogContext& conte
 
 void HttpServer::record_request_done(const RequestLogContext& context,
                                      const GenerationOutcome& outcome) {
-#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+#if defined(NINFER_WINDOWS_SERVE)
     const std::string source = service_ ? service_->context_session_info().owner : "unknown";
     const int prompt_tokens     = std::max(0, outcome.prompt_tokens);
     const int completion_tokens = std::max(0, outcome.completion_tokens);
@@ -437,7 +437,7 @@ void HttpServer::record_request_done(const RequestLogContext& context,
 
 void HttpServer::record_request_failure(const RequestLogContext& context,
                                         const RequestFailure& failure) {
-#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+#if defined(NINFER_WINDOWS_SERVE)
     const std::string source = service_ ? service_->context_session_info().owner : "unknown";
     {
         std::lock_guard lock(ui_metrics_mutex_);
@@ -521,7 +521,7 @@ void HttpServer::stop_stats_reporter() {
 
 ContextCacheHints HttpServer::request_cache_hints(const httplib::Request& req,
                                                  ContextCacheHints hints) const {
-#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+#if defined(NINFER_WINDOWS_SERVE)
     if (req.has_header("X-NInfer-Session")) {
         const std::string value = req.get_header_value("X-NInfer-Session");
         const auto allowed = [](unsigned char character) {
@@ -546,7 +546,7 @@ ContextCacheHints HttpServer::request_cache_hints(const httplib::Request& req,
     return hints;
 }
 
-#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+#if defined(NINFER_WINDOWS_SERVE)
 void HttpServer::handle_ui_cache_clear(const httplib::Request& req, httplib::Response& res) {
     require_local_control(req);
     if (service_ == nullptr || !service_->is_available()) {
@@ -608,7 +608,7 @@ void HttpServer::register_routes() {
 
     server_.set_pre_routing_handler([this](const httplib::Request& req, httplib::Response& res) {
         ensure_openai_request_id(req, res);
-#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+#if defined(NINFER_WINDOWS_SERVE)
         if (options_.api_key.empty() || (req.path == "/" && req.method == "GET") ||
             req.path == "/health" || req.method == "OPTIONS") {
 #else
@@ -692,7 +692,7 @@ void HttpServer::register_routes() {
         res.set_content(nlohmann::json{{"status", available ? "ok" : "unavailable"}}.dump(),
                         "application/json");
     });
-#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+#if defined(NINFER_WINDOWS_SERVE)
     server_.Get("/", [](const httplib::Request&, httplib::Response& res) {
         res.set_header("Cache-Control", "no-store");
         res.set_content(web::kChatPageHtml.data(), web::kChatPageHtml.size(),
@@ -722,6 +722,9 @@ void HttpServer::register_routes() {
             {"draft_tokens", speculative.draft_tokens},
             {"proposal_head", proposal_head_name(speculative.proposal_head)},
             {"prefix_reuse", service_->options().allow_prefix_reuse},
+            {"vision_enabled", service_->options().enable_vision},
+            {"image_formats", nlohmann::json::array({"png", "jpeg", "bmp"})},
+            {"video_enabled", false},
         };
         res.set_header("Cache-Control", "no-store");
         res.set_content(info.dump(), "application/json");
@@ -802,7 +805,7 @@ void HttpServer::handle_model(const httplib::Request& req, httplib::Response& re
                     "application/json");
 }
 
-#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+#if defined(NINFER_WINDOWS_SERVE)
 void HttpServer::handle_ui_metrics(const httplib::Request&, httplib::Response& res) const {
     using Json = nlohmann::json;
 
@@ -901,7 +904,7 @@ void HttpServer::attach(GenerationService& service) {
     }
     const ninfer::LoadSummary load = service.load_summary();
     public_model_id_               = resolve_public_model_id(options_, load.model_id);
-#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+#if defined(NINFER_WINDOWS_SERVE)
     const ninfer::RuntimeStats ui_baseline = service.runtime_stats();
     {
         std::lock_guard lock(ui_metrics_mutex_);

@@ -9,6 +9,7 @@ param(
     [string]$ListenHost,
     [int]$Port,
     [string]$ApiKey,
+    [switch]$Vision,
     [string]$RequestLog,
     [switch]$Stop,
     [switch]$OpenChat,
@@ -59,6 +60,14 @@ $PrefillChunk = [int](Get-EffectiveSetting 'PrefillChunk' $PrefillChunk 512)
 $ListenHost = [string](Get-EffectiveSetting 'ListenHost' $ListenHost '127.0.0.1')
 $Port = [int](Get-EffectiveSetting 'Port' $Port 8110)
 $ApiKey = [string](Get-EffectiveSetting 'ApiKey' $ApiKey '')
+$visionValue = Get-EffectiveSetting 'Vision' $Vision $false
+if ($visionValue -is [System.Management.Automation.SwitchParameter]) {
+    $VisionEnabled = $visionValue.IsPresent
+} elseif ($visionValue -is [bool]) {
+    $VisionEnabled = $visionValue
+} else {
+    throw 'Vision in .local\windows-server.psd1 must be $true or $false; use -Vision to enable it for one launch.'
+}
 $RequestLog = [string](Get-EffectiveSetting 'RequestLog' $RequestLog '')
 
 if ([string]::IsNullOrWhiteSpace($Model)) {
@@ -237,6 +246,7 @@ function Get-NInferServiceProbe {
         ModelListAvailable = $false
         ModelIds = @()
         ModelsAuthStatusCode = $null
+        VisionEnabled = $null
     }
     try {
         $health = Invoke-RestMethod -Uri "$ServiceUri/health" -TimeoutSec 2
@@ -257,6 +267,20 @@ function Get-NInferServiceProbe {
     } catch {
         $statusCode = Get-HttpStatusCodeFromException -Exception $_.Exception
         if ($statusCode -in @(401, 403)) { $result.ModelsAuthStatusCode = $statusCode }
+    }
+
+    try {
+        if ($ProbeApiKey) {
+            $modelInfo = Invoke-RestMethod -Uri "$ServiceUri/ui/model-info" -Headers @{ Authorization = "Bearer $ProbeApiKey" } -TimeoutSec 2
+        } else {
+            $modelInfo = Invoke-RestMethod -Uri "$ServiceUri/ui/model-info" -TimeoutSec 2
+        }
+        $visionProperty = $modelInfo.PSObject.Properties['vision_enabled']
+        if ($null -ne $visionProperty -and $visionProperty.Value -is [bool]) {
+            $result.VisionEnabled = $visionProperty.Value
+        }
+    } catch {
+        # Older services and transient model-info failures leave Vision readiness unknown.
     }
     return $result
 }
@@ -308,6 +332,9 @@ $modelAlias = 'qwen3.8-27b'
 if ($OpenChat -and $ServerArguments) {
     for ($index = 0; $index -lt $ServerArguments.Count; $index++) {
         $argument = [string]$ServerArguments[$index]
+        if ($argument -eq '--vision') {
+            throw 'In -OpenChat mode, use the launcher -Vision switch instead of a raw --vision server argument.'
+        }
         if ($argument -match '^(--model-id)=(.*)$') {
             throw 'In -OpenChat mode, pass --model-id and its value as separate server arguments.'
         }
@@ -349,6 +376,13 @@ if ($portOpen) {
     if ($healthOk -and $existingIds -contains $modelAlias) {
         if ($OpenChat) {
             Assert-NInferListenerExecutable -HostName $listenArgument -LocalPort $Port -ExpectedExecutable $serverExe
+        }
+        if ($VisionEnabled -and $initialProbe.VisionEnabled -ne $true) {
+            $visionState = if ($null -eq $initialProbe.VisionEnabled) { 'missing or unavailable' } else { 'disabled' }
+            throw ('The healthy NInfer service at {0} serves {1}, but vision_enabled is {2}. It was left running. Run stop-ninfer.bat, then start-ninfer.bat -Vision.' -f
+                $baseUri, $modelAlias, $visionState)
+        }
+        if ($OpenChat) {
             Write-Host "NInfer is already serving $modelAlias at $baseUri. Reusing the running service; this launch's model/device/context settings were not applied."
             try {
                 Start-Process -FilePath $chatUrl -WindowStyle Normal -ErrorAction Stop | Out-Null
@@ -430,6 +464,7 @@ if (-not [string]::IsNullOrWhiteSpace($RequestLog)) {
     $serverArgs += @('--request-log-jsonl', $RequestLog)
 }
 $serverArgs += @('--host', $listenArgument, '--port', "$Port", '--cors')
+if ($VisionEnabled) { $serverArgs += '--vision' }
 if ($ServerArguments) { $serverArgs += $ServerArguments }
 
 if ($OpenChat) {
@@ -462,7 +497,32 @@ try {
                     Assert-NInferListenerExecutable -HostName $listenArgument -LocalPort $Port -ExpectedExecutable $serverExe
                     throw (Get-ModelsAuthorizationError -ConfiguredApiKey $ApiKey -StatusCode $probe.ModelsAuthStatusCode)
                 }
-                if ($probeHealthy -and $probeIds -contains $modelAlias) {
+                $healthyExpectedModel = $probeHealthy -and ($probeIds -contains $modelAlias)
+                if ($healthyExpectedModel -and $VisionEnabled -and $probe.VisionEnabled -ne $true) {
+                    Assert-NInferListenerExecutable -HostName $listenArgument -LocalPort $Port -ExpectedExecutable $serverExe
+                    if ($probe.VisionEnabled -eq $false -and $startedServerProcess) {
+                        throw ('This launch started NInfer with Vision requested, but /ui/model-info reports vision_enabled=false at {0}.' -f $baseUri)
+                    }
+                    if (-not $startedServerProcess) {
+                        $visionState = if ($null -eq $probe.VisionEnabled) { 'missing or unavailable' } else { 'disabled' }
+                        throw ('The healthy NInfer service at {0} serves {1}, but vision_enabled is {2}. It was left running. Run stop-ninfer.bat, then start-ninfer.bat -Vision.' -f
+                            $baseUri, $modelAlias, $visionState)
+                    }
+                }
+                if ($healthyExpectedModel -and $VisionEnabled -and
+                    $null -eq $probe.VisionEnabled -and $startedServerProcess) {
+                    if ([DateTime]::UtcNow -ge $readyDeadline) {
+                        throw ('Timed out after {0} seconds waiting for vision_enabled=true at {1}.' -f
+                            $ReadyTimeoutSeconds, $baseUri)
+                    }
+                    if ($startedServerProcess.HasExited) {
+                        throw "NInfer server exited with code $($startedServerProcess.ExitCode) before reporting Vision readiness."
+                    }
+                    Start-Sleep -Milliseconds 1000
+                    continue
+                }
+                $ready = $healthyExpectedModel -and (-not $VisionEnabled -or $probe.VisionEnabled -eq $true)
+                if ($ready) {
                     Assert-NInferListenerExecutable -HostName $listenArgument -LocalPort $Port -ExpectedExecutable $serverExe
                     Write-Host "NInfer is ready with model $modelAlias at $baseUri."
                     try {
@@ -617,8 +677,13 @@ try {
                 }
 
                 if ([DateTime]::UtcNow -ge $readyDeadline) {
-                    throw ('Timed out after {0} seconds waiting for NInfer health and model alias {1} at {2}.' -f
-                        $ReadyTimeoutSeconds, $modelAlias, $baseUri)
+                    $readinessRequirement = if ($VisionEnabled) {
+                        'health, model alias, and vision_enabled=true'
+                    } else {
+                        'health and model alias'
+                    }
+                    throw ('Timed out after {0} seconds waiting for NInfer {1} at {2}.' -f
+                        $ReadyTimeoutSeconds, $readinessRequirement, $baseUri)
                 }
                 if ($startedServerProcess -and $startedServerProcess.HasExited) {
                     throw "NInfer server exited with code $($startedServerProcess.ExitCode) before becoming ready."

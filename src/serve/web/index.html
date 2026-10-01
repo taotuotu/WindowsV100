@@ -322,6 +322,8 @@
       white-space: pre-wrap;
     }
     .message-user .message-text { display: inline-block; max-width: 100%; padding: 11px 14px; border: 1px solid rgba(155, 174, 168, .14); border-radius: 5px 15px 15px 15px; background: rgba(255, 255, 255, .045); }
+    .message-images { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 8px; }
+    .message-images img { display: block; width: min(128px, 32vw); height: min(128px, 32vw); border: 1px solid rgba(155, 174, 168, .18); border-radius: 10px; background: #111618; object-fit: contain; }
     .message-assistant .message-text:empty::after { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 12px rgba(167, 216, 192, .45); content: ""; animation: pulse 1s ease-in-out infinite; }
     .message-assistant[data-finished="true"] .message-text:empty::after { content: none; }
 
@@ -357,6 +359,20 @@
     .composer textarea { display: block; width: 100%; min-height: 58px; max-height: 220px; resize: none; padding: 17px 18px 11px; border: 0; outline: 0; color: var(--text); background: transparent; font-size: 14px; line-height: 1.6; }
     .composer textarea::placeholder { color: #7d8a87; }
     .composer textarea:focus { box-shadow: none; }
+    .composer-media { padding: 0 14px 8px; }
+    .composer-media-tools { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 10px; }
+    .composer-media-tools .button { min-height: 31px; padding: 0 10px; font-size: 11px; }
+    .image-capability-note, .image-limit-note { margin: 0; color: var(--muted); font-size: 10px; line-height: 1.45; }
+    .image-limit-note { margin-top: 5px; }
+    .composer-attachments { display: flex; flex-wrap: wrap; gap: 7px; max-height: 98px; margin-top: 8px; overflow: auto; }
+    .attachment-card { display: flex; align-items: center; gap: 7px; min-width: 0; max-width: 245px; padding: 5px; border: 1px solid rgba(155, 174, 168, .16); border-radius: 10px; background: rgba(255, 255, 255, .025); }
+    .attachment-thumb { flex: 0 0 48px; width: 48px; height: 48px; border-radius: 7px; background: #111618; object-fit: contain; }
+    .attachment-placeholder { display: grid; place-items: center; color: var(--muted); font-size: 15px; }
+    .attachment-meta { min-width: 0; }
+    .attachment-name { max-width: 132px; overflow: hidden; color: var(--soft); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+    .attachment-state { margin-top: 3px; color: var(--muted); font-size: 9px; }
+    .attachment-state[data-state="error"] { color: var(--danger); }
+    .attachment-remove { flex: 0 0 auto; min-height: 28px; padding: 0 7px; font-size: 10px; }
     .composer-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 4px 10px 10px 16px; }
     .composer-hint { color: #788582; font-size: 11px; }
     .composer-buttons { display: flex; gap: 8px; }
@@ -397,6 +413,8 @@
       .metrics .metric:first-child { grid-column: span 2; }
       .composer-area { padding-top: 12px; }
       .composer textarea { min-height: 55px; padding: 14px 14px 8px; }
+      .composer-media { padding: 0 10px 8px; }
+      .composer-attachments { max-height: 92px; }
       .composer-hint { font-size: 10px; }
     }
 
@@ -473,6 +491,7 @@
         <span class="model-meta-chip">ctx 未获取</span>
         <span class="model-meta-chip">GPU 未获取</span>
         <span class="model-meta-chip">Prefix 复用未获取</span>
+        <span class="model-meta-chip">图像识别 配置读取中</span>
       </div>
     </section>
 
@@ -577,7 +596,16 @@
       <div class="composer-wrap">
         <div id="global-alert" class="alert" role="alert" hidden></div>
         <form id="chat-form" class="composer">
-          <textarea id="prompt" rows="1" aria-label="输入消息" placeholder="发一条消息…" required></textarea>
+          <textarea id="prompt" rows="1" aria-label="输入消息" placeholder="发一条消息…"></textarea>
+          <div class="composer-media">
+            <div class="composer-media-tools">
+              <button id="add-images" class="button" type="button" disabled>添加图片</button>
+              <input id="image-files" type="file" accept=".png,.jpg,.jpeg,.bmp,image/png,image/jpeg,image/bmp,image/x-ms-bmp" multiple hidden>
+              <span id="image-capability-note" class="image-capability-note" aria-live="polite">正在读取图片识别配置…</span>
+            </div>
+            <div id="composer-attachments" class="composer-attachments" aria-label="待发送图片" hidden></div>
+            <p class="image-limit-note">支持 PNG/JPEG/BMP，最多 4 张、每张不超过 16 MiB。图片只保存在当前页面内存，并随本地 API 请求发送。</p>
+          </div>
           <div class="composer-actions">
             <span class="composer-hint">Enter 发送 · Shift + Enter 换行</span>
             <div class="composer-buttons">
@@ -597,6 +625,8 @@
 
       const DEFAULT_MODEL = "qwen3.8-27b";
       const FALLBACK_API = "http://127.0.0.1:8110/v1";
+      const MAX_IMAGE_BYTES = 16 * 1024 * 1024;
+      const MAX_IMAGE_COUNT = 4;
       const apiBase = location.protocol === "file:" ? FALLBACK_API : `${location.origin}/v1`;
       const serverBase = apiBase.replace(/\/v1\/?$/, "");
       const modelInfoUrl = `${serverBase}/ui/model-info`;
@@ -619,6 +649,10 @@
         prompt: document.getElementById("prompt"),
         send: document.getElementById("send-button"),
         stop: document.getElementById("stop-button"),
+        addImages: document.getElementById("add-images"),
+        imageFiles: document.getElementById("image-files"),
+        imageCapabilityNote: document.getElementById("image-capability-note"),
+        composerAttachments: document.getElementById("composer-attachments"),
         newChat: document.getElementById("new-chat"),
         refreshModels: document.getElementById("refresh-models"),
         modelMetaTitle: document.getElementById("model-meta-title"),
@@ -647,6 +681,11 @@
       };
 
       let conversation = [];
+      let pendingImages = [];
+      let nextAttachmentId = 1;
+      let visionEnabled = false;
+      let visionFormats = new Set();
+      let modelInfoAvailable = false;
       let activeRequest = null;
       let requestSerial = 0;
       let followTail = true;
@@ -683,10 +722,18 @@
       }
 
       function updateManagementButtons() {
-        ui.send.disabled = Boolean(activeRequest || cacheClearInFlight || shutdownInFlight || serviceShutdownRequested);
+        const imagesBlocked = pendingImages.some(item => item.state !== "ready") ||
+          (pendingImages.length > 0 && !canAttachImages());
+        ui.send.disabled = Boolean(activeRequest || cacheClearInFlight || shutdownInFlight || serviceShutdownRequested || imagesBlocked);
         ui.newChat.disabled = Boolean(activeRequest || cacheClearInFlight || shutdownInFlight);
         ui.clearCache.disabled = Boolean(activeRequest || globalContextBusy || cacheClearInFlight || shutdownInFlight || serviceShutdownRequested);
         ui.shutdownServer.disabled = Boolean(cacheClearInFlight || shutdownInFlight || serviceShutdownRequested);
+        ui.addImages.disabled = Boolean(!canAttachImages() || activeRequest || cacheClearInFlight || shutdownInFlight || serviceShutdownRequested);
+        ui.imageFiles.disabled = ui.addImages.disabled;
+      }
+
+      function canAttachImages() {
+        return visionEnabled && ["png", "jpeg", "bmp"].some(format => visionFormats.has(format));
       }
 
       function setServiceActionStatus(message, state = "") {
@@ -1208,7 +1255,28 @@
         return parts[parts.length - 1] || value;
       }
 
+      function setImageCapability(info) {
+        modelInfoAvailable = Boolean(info);
+        visionEnabled = Boolean(info && info.vision_enabled === true);
+        const reportedFormats = info && Array.isArray(info.image_formats) ? info.image_formats : [];
+        visionFormats = new Set(reportedFormats.map(value => String(value).toLowerCase().replace(/^image\//, ""))
+          .map(value => value === "jpg" ? "jpeg" : value)
+          .filter(value => ["png", "jpeg", "bmp"].includes(value)));
+        if (!modelInfoAvailable) {
+          ui.imageCapabilityNote.textContent = "图片识别配置未获取；请刷新模型与配置。";
+        } else if (!visionEnabled) {
+          ui.imageCapabilityNote.textContent = "当前服务未启用图片识别，请以 --vision 启动服务后再添加图片。";
+        } else if (visionFormats.size === 0) {
+          ui.imageCapabilityNote.textContent = "服务未报告支持的 PNG/JPEG/BMP 格式，请刷新模型与配置。";
+        } else {
+          const labels = [...visionFormats].map(value => value.toUpperCase()).join("/");
+          ui.imageCapabilityNote.textContent = `图片识别已启用：${labels}；图片仅在本页内存中处理。`;
+        }
+        updateManagementButtons();
+      }
+
       function renderUnavailableModelInfo() {
+        setImageCapability(null);
         const alias = ui.model.value || DEFAULT_MODEL;
         ui.modelMetaTitle.textContent = `${friendlyModelName(alias)} · 配置未获取`;
         ui.modelMetaArtifact.textContent = "artifact 文件名未获取";
@@ -1219,9 +1287,11 @@
         appendModelMetaChip("ctx", "未获取");
         appendModelMetaChip("设备", "未获取");
         appendModelMetaChip("Prefix 复用", "未获取");
+        appendModelMetaChip("图像识别", "配置未获取");
       }
 
       function renderModelInfo(info) {
+        setImageCapability(info);
         const alias = typeof info.api_model_id === "string" && info.api_model_id
           ? info.api_model_id
           : (ui.model.value || DEFAULT_MODEL);
@@ -1268,6 +1338,10 @@
         appendModelMetaChip("Prefix 复用", typeof info.prefix_reuse === "boolean"
           ? (info.prefix_reuse ? "开" : "关")
           : "未获取");
+        const imageFormats = [...visionFormats].map(value => value.toUpperCase()).join("/");
+        appendModelMetaChip("图像识别", visionEnabled
+          ? (imageFormats ? `已启用 ${imageFormats}` : "已启用，格式未获取")
+          : "未启用（--vision）");
       }
 
       async function loadModelInfo() {
@@ -1299,7 +1373,200 @@
         window.scrollTo({ top: document.documentElement.scrollHeight, behavior: "auto" });
       }
 
-      function makeMessage(role, initialText = "") {
+      function imageFormatForFile(file) {
+        const match = file.name.toLowerCase().match(/\.(png|jpe?g|bmp)$/);
+        if (!match) return null;
+        const extensionFormat = match[1] === "jpg" ? "jpeg" : match[1];
+        const mime = String(file.type || "").toLowerCase();
+        const mimeFormats = {
+          "image/png": "png",
+          "image/jpeg": "jpeg",
+          "image/jpg": "jpeg",
+          "image/pjpeg": "jpeg",
+          "image/bmp": "bmp",
+          "image/x-ms-bmp": "bmp"
+        };
+        if (mime && (!mimeFormats[mime] || mimeFormats[mime] !== extensionFormat)) return null;
+        return visionFormats.has(extensionFormat) ? extensionFormat : null;
+      }
+
+      function renderPendingImages() {
+        const retainedCards = new Set();
+        for (const item of pendingImages) {
+          if (!item.card) {
+            const card = document.createElement("div");
+            card.className = "attachment-card";
+            const image = document.createElement("img");
+            image.className = "attachment-thumb";
+            image.alt = "图片预览";
+            image.hidden = true;
+            const placeholder = document.createElement("div");
+            placeholder.className = "attachment-thumb attachment-placeholder";
+            placeholder.setAttribute("aria-hidden", "true");
+            const meta = document.createElement("div");
+            meta.className = "attachment-meta";
+            const name = document.createElement("div");
+            name.className = "attachment-name";
+            const state = document.createElement("div");
+            state.className = "attachment-state";
+            const remove = document.createElement("button");
+            remove.className = "button attachment-remove";
+            remove.type = "button";
+            remove.textContent = "移除";
+            remove.addEventListener("click", () => removePendingImage(item));
+            meta.append(name, state);
+            card.append(image, placeholder, meta, remove);
+            item.card = card;
+            item.preview = { image, placeholder, name, state, remove };
+          }
+          const { image, placeholder, name, state, remove } = item.preview;
+          if (item.card.parentNode !== ui.composerAttachments) ui.composerAttachments.append(item.card);
+          retainedCards.add(item.card);
+          name.textContent = item.file.name;
+          name.title = item.file.name;
+          remove.setAttribute("aria-label", `移除图片 ${item.file.name}`);
+          state.dataset.state = item.state === "error" ? "error" : "";
+          state.textContent = item.state === "ready"
+            ? `${(item.file.size / (1024 * 1024)).toFixed(1)} MiB`
+            : (item.state === "error" ? "读取失败，请移除" : "本地读取中…");
+          if (item.state === "ready") {
+            placeholder.hidden = true;
+            image.hidden = false;
+            if (item.previewDataUrl !== item.dataUrl) {
+              image.src = item.dataUrl;
+              item.previewDataUrl = item.dataUrl;
+            }
+          } else {
+            image.hidden = true;
+            placeholder.hidden = false;
+            placeholder.textContent = item.state === "error" ? "!" : "…";
+          }
+        }
+        for (const card of [...ui.composerAttachments.children]) {
+          if (!retainedCards.has(card)) card.remove();
+        }
+        ui.composerAttachments.hidden = pendingImages.length === 0;
+      }
+
+      function removePendingImage(item) {
+        item.removed = true;
+        if (item.reader && item.reader.readyState === FileReader.LOADING) item.reader.abort();
+        pendingImages = pendingImages.filter(candidate => candidate !== item);
+        renderPendingImages();
+        updateManagementButtons();
+        clearAlert();
+      }
+
+      function clearPendingImages() {
+        const previous = pendingImages;
+        pendingImages = [];
+        for (const item of previous) {
+          item.removed = true;
+          if (item.reader && item.reader.readyState === FileReader.LOADING) item.reader.abort();
+        }
+        ui.imageFiles.value = "";
+        renderPendingImages();
+        updateManagementButtons();
+      }
+
+      function readImageAttachment(item) {
+        const reader = new FileReader();
+        item.reader = reader;
+        item.state = "reading";
+        reader.onload = () => {
+          if (item.removed || !pendingImages.includes(item)) return;
+          const result = typeof reader.result === "string" ? reader.result : "";
+          const comma = result.indexOf(",");
+          if (comma < 0 || !result.slice(0, comma).toLowerCase().endsWith(";base64")) {
+            item.state = "error";
+          } else {
+            const mime = item.format === "jpeg" ? "image/jpeg" : `image/${item.format}`;
+            item.dataUrl = `data:${mime};base64,${result.slice(comma + 1)}`;
+            item.state = "ready";
+          }
+          item.reader = null;
+          renderPendingImages();
+          updateManagementButtons();
+        };
+        reader.onerror = () => {
+          if (item.removed || !pendingImages.includes(item)) return;
+          item.state = "error";
+          item.reader = null;
+          renderPendingImages();
+          updateManagementButtons();
+        };
+        reader.onabort = () => {
+          if (item.removed || !pendingImages.includes(item)) return;
+          item.state = "error";
+          item.reader = null;
+          renderPendingImages();
+          updateManagementButtons();
+        };
+        try {
+          reader.readAsDataURL(item.file);
+        } catch (_) {
+          item.state = "error";
+          item.reader = null;
+          renderPendingImages();
+          updateManagementButtons();
+        }
+      }
+
+      function addSelectedImages(files) {
+        const chosen = Array.from(files || []);
+        if (chosen.length === 0) return;
+        clearAlert();
+        if (!canAttachImages()) {
+          showAlert("当前服务未报告可用的图片识别格式；请刷新模型配置，确认服务以 --vision 启动后再试。");
+          return;
+        }
+        const remaining = MAX_IMAGE_COUNT - pendingImages.length;
+        if (remaining <= 0) {
+          showAlert(`最多添加 ${MAX_IMAGE_COUNT} 张图片；请先移除现有附件。`);
+          return;
+        }
+        let skippedForCount = 0;
+        const considered = chosen.slice(0, remaining);
+        skippedForCount = chosen.length - considered.length;
+        const valid = [];
+        let skippedForSize = 0;
+        let skippedForFormat = 0;
+        for (const file of considered) {
+          if (file.size <= 0 || file.size > MAX_IMAGE_BYTES) {
+            skippedForSize++;
+            continue;
+          }
+          const format = imageFormatForFile(file);
+          if (!format) {
+            skippedForFormat++;
+            continue;
+          }
+          valid.push({ file, format });
+        }
+        const notices = [];
+        if (skippedForCount) notices.push(`${skippedForCount} 张超出最多 ${MAX_IMAGE_COUNT} 张的限制`);
+        if (skippedForSize) notices.push(`${skippedForSize} 张为空文件或超过单张 16 MiB 限制`);
+        if (skippedForFormat) notices.push(`${skippedForFormat} 张格式不受当前服务支持`);
+        if (notices.length) showAlert(`部分图片未添加：${notices.join("；")}。`);
+        for (const entry of valid) {
+          pendingImages.push({
+            id: nextAttachmentId++,
+            file: entry.file,
+            format: entry.format,
+            dataUrl: null,
+            reader: null,
+            state: "reading",
+            removed: false
+          });
+        }
+        renderPendingImages();
+        updateManagementButtons();
+        for (const item of pendingImages.filter(candidate => !candidate.dataUrl && candidate.state === "reading" && !candidate.reader)) {
+          readImageAttachment(item);
+        }
+      }
+
+      function makeMessage(role, initialText = "", imageAttachments = []) {
         const assistant = role === "assistant";
         const article = document.createElement("article");
         article.className = `message ${assistant ? "message-assistant" : "message-user"}`;
@@ -1387,6 +1654,18 @@
         }
 
         main.append(content);
+        if (imageAttachments.length) {
+          const images = document.createElement("div");
+          images.className = "message-images";
+          imageAttachments.forEach((attachment, index) => {
+            const image = document.createElement("img");
+            image.src = attachment.dataUrl;
+            image.alt = `用户附图 ${index + 1}`;
+            image.loading = "lazy";
+            images.append(image);
+          });
+          main.append(images);
+        }
         article.append(avatar, main);
         return { article, state, content };
       }
@@ -1640,6 +1919,7 @@
 
       function resetChat() {
         webSessionId = createWebSessionId();
+        clearPendingImages();
         if (activeRequest) {
           const pending = activeRequest;
           activeRequest = null;
@@ -1668,16 +1948,24 @@
         ui.prompt.style.height = `${Math.min(ui.prompt.scrollHeight, 220)}px`;
       }
 
-      async function sendMessage(text) {
+      async function sendMessage(text, imageAttachments = []) {
         const cleanText = text.trim();
-        if (!cleanText || activeRequest) return;
+        if ((!cleanText && imageAttachments.length === 0) || activeRequest) return;
+        const userText = cleanText || "请描述图像";
         clearAlert();
         ui.welcome.hidden = true;
-        const userView = makeMessage("user", cleanText);
+        const userView = makeMessage("user", userText, imageAttachments);
         const assistantView = makeMessage("assistant");
         ui.conversation.append(userView.article, assistantView.article);
 
-        const outgoingMessages = conversation.concat({ role: "user", content: cleanText });
+        let userContent = userText;
+        if (imageAttachments.length) {
+          userContent = [{ type: "text", text: userText }];
+          for (const attachment of imageAttachments) {
+            userContent.push({ type: "image_url", image_url: { url: attachment.dataUrl } });
+          }
+        }
+        const outgoingMessages = conversation.concat({ role: "user", content: userContent });
         // Keep the visible user turn in history even if generation later fails.
         conversation = outgoingMessages;
         const req = {
@@ -1783,10 +2071,24 @@
         event.preventDefault();
         if (activeRequest || cacheClearInFlight || shutdownInFlight || serviceShutdownRequested) return;
         const text = ui.prompt.value;
-        if (!text.trim()) return;
+        if (!text.trim() && pendingImages.length === 0) return;
+        if (pendingImages.some(item => item.state === "reading")) {
+          showAlert("图片仍在本地读取，请等预览完成后再发送；不会发送未读完的附件。");
+          return;
+        }
+        if (pendingImages.some(item => item.state !== "ready" || !item.dataUrl)) {
+          showAlert("有图片读取失败，请移除失败附件后再发送。尚未发送的图片不会丢失。");
+          return;
+        }
+        if (pendingImages.length && !canAttachImages()) {
+          showAlert("当前服务未启用这些图片格式。请移除附件，并以 --vision 启动服务后重试。");
+          return;
+        }
+        const images = pendingImages.map(item => ({ dataUrl: item.dataUrl, format: item.format }));
         ui.prompt.value = "";
         resizePrompt();
-        sendMessage(text);
+        clearPendingImages();
+        sendMessage(text, images);
       });
 
       ui.prompt.addEventListener("input", resizePrompt);
@@ -1799,6 +2101,14 @@
 
       ui.stop.addEventListener("click", () => {
         if (activeRequest) activeRequest.controller.abort();
+      });
+      ui.addImages.addEventListener("click", () => {
+        if (!ui.addImages.disabled) ui.imageFiles.click();
+      });
+      ui.imageFiles.addEventListener("change", () => {
+        const files = Array.from(ui.imageFiles.files || []);
+        ui.imageFiles.value = "";
+        addSelectedImages(files);
       });
       ui.newChat.addEventListener("click", resetChat);
       ui.refreshModels.addEventListener("click", () => {

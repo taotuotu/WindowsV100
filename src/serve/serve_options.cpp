@@ -67,7 +67,7 @@ KvCapacityPolicy parse_kv_capacity(const char* text) {
 
 std::string serve_usage_text(const char* argv0) {
     return std::string("usage: ") + argv0 +
-#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+#if defined(NINFER_WINDOWS_SERVE)
            " [model.ninfer] [--model PATH] "
 #else
            " <model.ninfer> "
@@ -76,7 +76,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--model-id ID] [--max-context N] [--kv-capacity N|auto] [--max-concurrency N] "
            "[--max-pending-requests N] [--pending-timeout-ms N] "
            "[--prefill-chunk N] [--log-stats-interval-ms N] "
-#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+#if defined(NINFER_WINDOWS_SERVE)
            "[--device auto|N] "
 #else
            "[--device N] "
@@ -91,11 +91,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--response-store-max-records N] [--response-store-max-mib N] "
            "[--kv-dtype bf16|int8|fp8|nvfp4|k8v4] [--spec mtp|dflash|dflash2 --draft-tokens N] "
            "[--default-max-tokens N] [--default-thinking-budget N] "
-#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
-           "[--no-cuda-graph] [--no-prefix-reuse] "
-#else
            "[--vision] [--no-cuda-graph] [--no-prefix-reuse] "
-#endif
            "[--lm-head-draft] [--no-thinking] [--preserve-thinking] [--cors] "
            "[--temperature F] [--top-p F] [--top-k N] [--min-p F] [--presence-penalty F] "
            "[--frequency-penalty F] [--seed N] [--greedy]\n"
@@ -113,15 +109,16 @@ std::string serve_usage_text(const char* argv0) {
            "       Responses state is process-local and bounded to 1024 records / 256 MiB by "
            "default\n"
            "       --log-stats-interval-ms defaults to 5000; 0 disables periodic throughput logs\n"
-#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
-           "       this text-only build rejects media input; Vision cannot be enabled\n"
+#if defined(NINFER_WINDOWS_SERVE)
+           "       --vision enables PNG/JPEG/BMP image input and fixed Vision GPU allocations; "
+           "video input is unavailable on Windows\n"
 #else
            "       --vision enables media and loads the fixed Vision GPU allocations\n"
 #endif
            "       --kv-capacity auto leaves " +
            std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL)) +
            " MiB of sizing headroom\n"
-#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+#if defined(NINFER_WINDOWS_SERVE)
            "       compatible-prefix reuse is enabled by default; hits require a matching prompt prefix "
            "and saved state\n"
            "       exclusive-session cache defaults: extra Device StateImages=1, Host StateImages=8, Host KV=0 MiB, "
@@ -142,8 +139,8 @@ std::string serve_usage_text(const char* argv0) {
            "       sampler defaults come from the loaded model and resolved thinking mode; "
            "server flags and request fields override individual values.\n"
            "       --greedy forces temperature 0 (exact argmax).\n"
-#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
-           "       text-only Windows defaults: model "
+#if defined(NINFER_WINDOWS_SERVE)
+           "       Windows defaults: model "
            "models/qwen3_8_27b_nvfp4_v2.ninfer, "
            "host 127.0.0.1, port 8110, alias qwen3.8-27b, CUDA device auto (SM70, >=30 GiB), "
            "context/KV 8192, "
@@ -159,7 +156,7 @@ std::string serve_usage_text(const char* argv0) {
 
 ServeOptions parse_serve_options(int argc, char** argv) {
     ServeOptions options;
-#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+#if defined(NINFER_WINDOWS_SERVE)
     options.device                                      = -1;
     options.context_cache.device_state_slots                = 1;
     options.context_cache.host_state_slots                  = 8;
@@ -192,7 +189,7 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             if (++i >= argc) { throw std::invalid_argument(std::string(flag) + " needs a value"); }
             return argv[i];
         };
-#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+#if defined(NINFER_WINDOWS_SERVE)
         if (arg == "--model" || arg == "-m") {
             options.artifact_path = require_value(arg.c_str());
             if (options.artifact_path.empty()) {
@@ -316,7 +313,7 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.response_store_max_bytes = static_cast<std::size_t>(mib << 20);
         } else if (arg == "--device") {
             const char* value = require_value("--device");
-#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+#if defined(NINFER_WINDOWS_SERVE)
             if (std::string_view(value) == "auto") {
                 options.device = -1;
             } else {
@@ -345,12 +342,7 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             }
             options.default_thinking_budget = static_cast<std::uint32_t>(budget);
         } else if (arg == "--vision") {
-#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
-            throw std::invalid_argument(
-                "--vision is unavailable in this text-only Windows server build");
-#else
             options.enable_vision = true;
-#endif
         } else if (arg == "--no-cuda-graph") {
             options.use_cuda_graph = false;
         } else if (arg == "--no-prefix-reuse") {
@@ -417,7 +409,7 @@ ServeOptions parse_serve_options(int argc, char** argv) {
     if (options.max_concurrency == 0 || options.max_concurrency > kMaximumConcurrency) {
         throw std::invalid_argument("--max-concurrency must be in [1,8]");
     }
-#if defined(NINFER_WINDOWS_TEXT_ONLY_SERVE)
+#if defined(NINFER_WINDOWS_SERVE)
     if (options.max_concurrency != 1) {
         throw std::invalid_argument("the Windows exclusive-session server requires --max-concurrency 1");
     }

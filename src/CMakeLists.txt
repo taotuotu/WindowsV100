@@ -409,10 +409,13 @@ if(NINFER_BUILD_MEDIA_ACQUIRE)
   ninfer_internal_includes(ninfer_media_acquire)
   target_link_libraries(ninfer_media_acquire PRIVATE PkgConfig::LIBCURL)
 elseif(NINFER_BUILD_WINDOWS_SERVE)
-  # The text-only Windows HTTP service must never fetch request-supplied media.
+  # Native Windows byte/data/HTTP acquisition; no target package links transport code.
   add_library(ninfer_media_acquire STATIC
-    product/media_acquire/windows_text_only.cpp)
+    product/media_acquire/windows.cpp)
   ninfer_internal_includes(ninfer_media_acquire)
+  target_link_libraries(ninfer_media_acquire PRIVATE winhttp ws2_32)
+  target_compile_definitions(ninfer_media_acquire PRIVATE
+    NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00)
 endif()
 
 if(NINFER_BUILD_PROMPT_INPUT)
@@ -462,7 +465,7 @@ if(NINFER_BUILD_SERVE)
       "${CMAKE_CURRENT_SOURCE_DIR}/serve/web/index.html")
     if(NOT EXISTS "${NINFER_WINDOWS_CHAT_PAGE_HTML_FILE}")
       message(FATAL_ERROR
-        "Windows text-only serving requires src/serve/web/index.html")
+        "Windows serving requires src/serve/web/index.html")
     endif()
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
       "${NINFER_WINDOWS_CHAT_PAGE_HTML_FILE}")
@@ -548,7 +551,7 @@ if(NINFER_BUILD_SERVE)
     PRIVATE ninfer_media_acquire ninfer_product_logging CUDA::cudart)
   if(WIN32 AND NINFER_BUILD_WINDOWS_SERVE)
     target_compile_definitions(ninfer_serve
-      PUBLIC NINFER_WINDOWS_TEXT_ONLY_SERVE=1
+      PUBLIC NINFER_WINDOWS_SERVE=1
       _WIN32_WINNT=0x0A00 NOMINMAX WIN32_LEAN_AND_MEAN)
   endif()
   if(WIN32)

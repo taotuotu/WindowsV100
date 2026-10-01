@@ -1,6 +1,6 @@
 # Windows / V100 使用指南
 
-Windows 专用程序面向单张 32GB SM70 Volta、固定 Qwen3.8-27B mixed NVFP4/FP8 `.ninfer` v2、文本输入。原项目的 RTX 5090、Linux、多媒体及多模型文档保留用于开发参考，不代表此发行版的验证范围。性能证据以 [Windows 性能记录](windows-performance.md) 为准。
+Windows 专用程序面向单张 32GB SM70 Volta、固定 Qwen3.8-27B mixed NVFP4/FP8 `.ninfer` v2，支持文本和可选静态图像输入。原项目的 RTX 5090、Linux、视频及多模型文档保留用于开发参考，不代表此发行版的验证范围。性能证据以 [Windows 性能记录](windows-performance.md) 为准。
 
 ## 1. 环境
 
@@ -42,6 +42,23 @@ identity: qwen3.8-27b / nvfp4, container v2
 
 脚本 `run-ninfer-server.ps1 -OpenChat` 启用上述一键模式；不带该开关时维持纯 API 服务入口。一键模式的模型、地址、端口与密钥应使用脚本的 `-Model/-ListenHost/-Port/-ApiKey` 参数，避免原生额外参数覆盖探测目标。额外的 `--model-id` 会被用于预期别名探测。
 
+启用图像识别可在启动时加 `-Vision`：
+
+```powershell
+.\start-ninfer.bat -Vision
+# 或直接运行 API 服务
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-ninfer-server.ps1 -Vision
+```
+
+也可在 `.local/windows-server.psd1` 中设 `Vision = $true`，让之后的启动默认启用。Windows 使用系统自带 WIC 解码 JPEG、PNG 和 BMP；JPEG EXIF 方向会按图像显示方向校正，解码像素与请求字节仍受处理器预算限制。WebP、TIFF、GIF 和视频不在此 Windows 路径的支持范围内。图像随后由现有 CPU resize、BF16 patch 预处理与模型内置 Vision Encoder 处理；此开关不修改 `Context`。启动器请求 Vision 时会核验 `/ui/model-info` 的 `vision_enabled=true`；已有纯文本服务会提示先停止再重启。
+
+2026-10-02 本机正常启动已同时分配 Vision、153600 BF16 KV、MTP3 与上述前缀缓存。
+启动快照剩余约262MiB显存；视觉权重约282MiB，workspace相对纯文本增加约160MiB。
+这是启动与接口读取结果，尚未主动验证图片生成、识图质量、视觉速度或满上下文稳定性。
+其它电脑需按实际空闲显存选择容量，公共默认仍为8192。
+
+图像可使用 inline `data:image/...;base64,...` 或 HTTP(S) 图片 URL。远程 URL 获取要求 Windows 10 21H1 或更新版本；inline data URI 不增加这项系统版本要求。
+
 | 设置 | 公共默认 |
 |---|---|
 | Device | `auto`，首个 SM70 且总显存不少于 30 GiB 的 CUDA 设备 |
@@ -50,6 +67,7 @@ identity: qwen3.8-27b / nvfp4, container v2
 | KV dtype | `bf16`，K/V 均为 16 位 |
 | 推测解码 | learned MTP3、optimized head |
 | Prefill chunk | 512 |
+| Vision 图片输入 | 默认关闭；用 `-Vision` 或本机配置 `Vision = $true` 开启 |
 | Listen / port | `127.0.0.1:8110` |
 | 前缀缓存 | 开启；当前会话独占；额外 Device State 1、Host State 8、Host KV 0 |
 | 活动请求 | 1；第二个生成请求返回429/`inference_busy`，完成或停止后重试 |
@@ -76,7 +94,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-ninfer-server.
 
 脚本显式参数优先于个人配置，个人配置优先于公共默认。个人文件不会打包或纳入 Git。已有电脑上保留的大上下文配置不改变公共默认。
 
-本机曾成功分配 BF16 / MTP3 / prefix-cache 的 153600 容量，剩余显存约 704MiB。空闲显存、KV、prefill chunk 和其它进程会改变上限；容量成功不代表已经喂满该长度。增大 `Context` 时先给输入和输出留足总预算。
+本机成功分配 BF16 / MTP3 / prefix-cache 的 153600 容量：纯文本启动快照剩余约704MiB，开启 Vision 后约262MiB。空闲显存、KV、prefill chunk 和其它进程会改变上限；容量成功不代表已经喂满该长度。增大 `Context` 时先给输入和输出留足总预算。
 
 直接调用 EXE 时，可用 `--device auto` 或数字 ordinal，以及 `--model PATH`。`--help` 不枚举 GPU。默认模型相对当前工作目录；启动器会传入解析后的模型路径。未指定 KV 容量时跟随 `--max-context`；也可显式用 `--kv-capacity N`。精确选项以 EXE 的 `--help` 为准。
 
@@ -85,6 +103,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-ninfer-server.
 一键入口 `start-ninfer.bat` 会在就绪后打开 **http://127.0.0.1:8110/**。已有服务也可直接访问此地址。页面从 `GET /ui/model-info` 读取实际模型 ID、artifact basename、KV、MTP 档位、容量和设备；未知信息显示未获取。网页源代码构建时嵌入 EXE，运行不需要 CDN、npm 或额外静态文件。
 
 多轮聊天与 API key 仅在页面内存里；刷新清空。停止生成保留已经收到的文本。输出作为文本呈现。
+
+服务启用 Vision 后，输入框的“添加图片”支持 PNG/JPEG/BMP，本轮最多4张、单张16MiB。
+图片在本地读取为 data URI，显示预览并允许移除；发送后按标准 `image_url` 内容项进入聊天历史，
+后续轮次保留这些图像。没有文字时使用“请描述图像”。附件读取完成后才能发送；新对话清除图片与
+文字历史。页面不会把图片上传给外部服务。4张是网页附件上限，API仍按总体媒体、上下文和显存预算
+接收；图片数量合规不代表一定能放进模型上下文。
 
 ### 当前会话独占缓存
 
@@ -111,7 +135,7 @@ Windows只接收一个生成请求，包括输入准备、生成和HTTP结果交
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-ninfer-server.ps1 -ApiKey 'your-local-key'
 ```
 
-随后网页和客户端填写相同 key。`/health` 提供健康状态，`/v1/models` 提供模型列表。默认仅本机可访问；另一台设备或云服务不能访问此电脑的 `127.0.0.1`。HTTP 协议和拒绝项见 [serving](serving.md)，Windows 多媒体输入被关闭。
+随后网页和客户端填写相同 key。`/health` 提供健康状态，`/v1/models` 提供模型列表。Vision 开启时可通过已支持的 OpenAI/Anthropic 图像字段提交 JPEG、PNG 或 BMP；视频仍返回不支持。默认仅本机可访问；另一台设备或云服务不能访问此电脑的 `127.0.0.1`。HTTP 协议和拒绝项见 [serving](serving.md)。
 
 ### 速率如何计算
 
