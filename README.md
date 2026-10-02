@@ -59,6 +59,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-ninfer-server.
 
 默认采用本机使用者的运行配置：143600 上下文、BF16 KV、MTP6、prefill2048。使用者报告其任务中 MTP6 最快，且容量需降至143600避免 OOM；这属于本机使用反馈，完整输入长度与受控对比尚未归档。可把个人设置写入 `.local/windows-server.psd1`，显式命令参数优先；该目录不会进入源码或发行包。其它电脑可用 `-Context` 调整显存预算。
 
+**长上下文 MTP 声明：** 本机使用反馈显示，随着实际上下文占用增加，较大 MTP 草稿长度相对于较小草稿长度的速度表现会变差，长上下文下可能更慢。MTP6 是当前默认；长上下文任务应结合实际输出吞吐选择档位。这里指实际输入与历史占用，详见 [性能记录](docs/windows-performance.md#长上下文与-mtp-档位)。
+
 ### 会话缓存与关闭服务
 
 Windows 服务只保留当前会话的缓存：同一会话连续请求继续复用，切换会话前清除旧会话的全部私有/共享 checkpoint。网页每个新对话发送独立 `X-NInfer-Session` 标识；外部客户端可发送同一请求头区分会话。不发送时，Chat/Anthropic 按首个 user turn 的内容摘要识别，Responses 沿用 `previous_response_id` 链的会话标识。模型仍逐项验证真实 token 前缀，标识只决定缓存归属。

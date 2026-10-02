@@ -100,6 +100,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-ninfer-server.
 才能避免 OOM；当前公共默认采用这组三项，BF16 KV保持。此为本机反馈，不能当成所有任务、
 电脑或满上下文工作负载的性能保证，完整受控对比尚未归档。
 
+**长上下文 MTP 声明：** 使用者反馈实际上下文占用越大，较大 MTP 草稿长度相对较小档位的速度表现越差，长上下文下可能更慢。选择 `DraftTokens` 时结合实际上下文与输出吞吐；MTP6 为当前默认。完整口径见 [性能记录](windows-performance.md#长上下文与-mtp-档位)。
+
 本机成功分配 BF16 / MTP3 / prefix-cache 的 153600 容量：纯文本启动快照剩余约704MiB，开启 Vision 后约262MiB。空闲显存、KV、prefill chunk 和其它进程会改变上限；容量成功不代表已经喂满该长度。增大 `Context` 时先给输入和输出留足总预算。
 
 直接调用 EXE 时，可用 `--device auto` 或数字 ordinal，以及 `--model PATH`。`--help` 不枚举 GPU。默认模型相对当前工作目录；启动器会传入解析后的模型路径。未指定 KV 容量时跟随 `--max-context`；也可显式用 `--kv-capacity N`。精确选项以 EXE 的 `--help` 为准。
