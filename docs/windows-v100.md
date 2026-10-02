@@ -55,7 +55,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-ninfer-server.
 2026-10-02 本机正常启动已同时分配 Vision、153600 BF16 KV、MTP3 与上述前缀缓存。
 启动快照剩余约262MiB显存；视觉权重约282MiB，workspace相对纯文本增加约160MiB。
 这是启动与接口读取结果，尚未主动验证图片生成、识图质量、视觉速度或满上下文稳定性。
-其它电脑需按实际空闲显存选择容量，公共默认仍为8192。
+这是旧 MTP3 / prefill512 配置的快照。当前默认改为使用者运行反馈中的
+MTP6 / prefill2048 / 143600；其它电脑需按实际空闲显存选择容量。
 
 图像可使用 inline `data:image/...;base64,...` 或 HTTP(S) 图片 URL。远程 URL 获取要求 Windows 10 21H1 或更新版本；inline data URI 不增加这项系统版本要求。
 
@@ -63,10 +64,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-ninfer-server.
 |---|---|
 | Device | `auto`，首个 SM70 且总显存不少于 30 GiB 的 CUDA 设备 |
 | Model | `models/qwen3_8_27b_nvfp4_v2.ninfer` |
-| Context / KV capacity | 8192，输入和输出合计 |
+| Context / KV capacity | 143600，输入和输出合计 |
 | KV dtype | `bf16`，K/V 均为 16 位 |
-| 推测解码 | learned MTP3、optimized head |
-| Prefill chunk | 512 |
+| 推测解码 | learned MTP6、optimized head |
+| Prefill chunk | 2048 |
 | Vision 图片输入 | 默认关闭；用 `-Vision` 或本机配置 `Vision = $true` 开启 |
 | Listen / port | `127.0.0.1:8110` |
 | 前缀缓存 | 开启；当前会话独占；额外 Device State 1、Host State 8、Host KV 0 |
@@ -78,7 +79,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-ninfer-server.
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-ninfer-server.ps1 `
     -Model .\models\qwen3_8_27b_nvfp4_v2.ninfer -Device auto `
-    -Context 32768 -KvDtype bf16 -DraftTokens 3 -PrefillChunk 512
+    -Context 143600 -KvDtype bf16 -DraftTokens 6 -PrefillChunk 2048
 ```
 
 也可以新建 `.local/windows-server.psd1`：
@@ -86,13 +87,18 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-ninfer-server.
 ```powershell
 @{
     Device = 'auto'
-    Context = 32768
+    Context = 143600
     KvDtype = 'bf16'
+    DraftTokens = 6
+    PrefillChunk = 2048
     Port = 8110
 }
 ```
 
-脚本显式参数优先于个人配置，个人配置优先于公共默认。个人文件不会打包或纳入 Git。已有电脑上保留的大上下文配置不改变公共默认。
+脚本显式参数优先于个人配置，个人配置优先于公共默认。个人文件不会打包或纳入 Git。
+2026-10-02 使用者反馈其任务中 MTP 草稿长度6最快，prefill2048需要将上下文降至143600
+才能避免 OOM；当前公共默认采用这组三项，BF16 KV保持。此为本机反馈，不能当成所有任务、
+电脑或满上下文工作负载的性能保证，完整受控对比尚未归档。
 
 本机成功分配 BF16 / MTP3 / prefix-cache 的 153600 容量：纯文本启动快照剩余约704MiB，开启 Vision 后约262MiB。空闲显存、KV、prefill chunk 和其它进程会改变上限；容量成功不代表已经喂满该长度。增大 `Context` 时先给输入和输出留足总预算。
 

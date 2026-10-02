@@ -6,7 +6,8 @@ Anthropic-compatible HTTP endpoints over one resident NInfer Engine.
 
 For the local Windows/V100 target, build and launch `ninfer-windows-serve` as described in
 [Windows/V100](windows-v100.md). Its public defaults are alias `qwen3.8-27b`, port 8110, context/KV
-capacity 8192, automatic 32GB SM70 device selection, BF16 KV, MTP3, and one active request. Personal
+capacity 143600, automatic 32GB SM70 device selection, BF16 KV, MTP6, prefill chunk 2048,
+and one active request. Personal
 settings may override these through `.local/windows-server.psd1`. Add `--vision` (launcher
 `-Vision`) for PNG, JPEG, and BMP images. This build uses native WIC decoding and WinHTTP media
 acquisition; video, GIF, TIFF, and WebP are unsupported. Remote URLs require Windows 10 21H1 or

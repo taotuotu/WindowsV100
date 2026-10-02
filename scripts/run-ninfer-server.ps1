@@ -53,10 +53,10 @@ function Get-EffectiveSetting {
 
 $Model = [string](Get-EffectiveSetting 'Model' $Model '')
 $Device = [string](Get-EffectiveSetting 'Device' $Device 'auto')
-$Context = [int](Get-EffectiveSetting 'Context' $Context 8192)
+$Context = [int](Get-EffectiveSetting 'Context' $Context 143600)
 $KvDtype = [string](Get-EffectiveSetting 'KvDtype' $KvDtype 'bf16')
-$DraftTokens = [int](Get-EffectiveSetting 'DraftTokens' $DraftTokens 3)
-$PrefillChunk = [int](Get-EffectiveSetting 'PrefillChunk' $PrefillChunk 512)
+$DraftTokens = [int](Get-EffectiveSetting 'DraftTokens' $DraftTokens 6)
+$PrefillChunk = [int](Get-EffectiveSetting 'PrefillChunk' $PrefillChunk 2048)
 $ListenHost = [string](Get-EffectiveSetting 'ListenHost' $ListenHost '127.0.0.1')
 $Port = [int](Get-EffectiveSetting 'Port' $Port 8110)
 $ApiKey = [string](Get-EffectiveSetting 'ApiKey' $ApiKey '')

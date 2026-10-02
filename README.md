@@ -46,16 +46,18 @@ CUDA 13 已移除 Volta 编译支持。更详细的安装、配置和问题处�
 | Base URL | `http://127.0.0.1:8110/v1` |
 | Model | `qwen3.8-27b` |
 | API key | 默认不鉴权；客户端必填时可填 `local` |
-| 上下文容量 | 8192，输入与输出合计 |
+| 上下文容量 | 143600，输入与输出合计 |
+| MTP 草稿长度 | 6，optimized head |
+| 预填充分块 | 2048 |
 | 活动请求 | 1，同时发来的第二个生成请求返回 HTTP 429 |
 
-提高容量或指定设备：
+指定设备及启动参数：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-ninfer-server.ps1 -Device 1 -Context 153600 -KvDtype bf16
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-ninfer-server.ps1 -Device 1 -Context 143600 -KvDtype bf16 -DraftTokens 6 -PrefillChunk 2048
 ```
 
-153600 是本机 32GB Volta 上成功分配的配置，需要充足空闲显存；它不代表 15 万 token 实际输入的性能或质量已经验证。可把个人设置写入 `.local/windows-server.psd1`，显式命令参数优先；该目录不会进入源码或发行包。
+默认采用本机使用者的运行配置：143600 上下文、BF16 KV、MTP6、prefill2048。使用者报告其任务中 MTP6 最快，且容量需降至143600避免 OOM；这属于本机使用反馈，完整输入长度与受控对比尚未归档。可把个人设置写入 `.local/windows-server.psd1`，显式命令参数优先；该目录不会进入源码或发行包。其它电脑可用 `-Context` 调整显存预算。
 
 ### 会话缓存与关闭服务
 

@@ -167,9 +167,9 @@ std::vector<std::string> effective_arguments(const std::vector<std::string>& arg
     effective.push_back(std::move(model));
     const std::vector<std::string> defaults{
         "--host", "127.0.0.1", "--port", "8110", "--model-id", "qwen3.8-27b",
-        "--max-context", "8192", "--max-concurrency", "1",
-        "--prefill-chunk", "512", "--kv-dtype", "bf16", "--spec", "mtp",
-        "--draft-tokens", "3", "--lm-head-draft", "--no-thinking", "--temperature", "0",
+        "--max-context", "143600", "--max-concurrency", "1",
+        "--prefill-chunk", "2048", "--kv-dtype", "bf16", "--spec", "mtp",
+        "--draft-tokens", "6", "--lm-head-draft", "--no-thinking", "--temperature", "0",
         "--seed", "123",
     };
     effective.insert(effective.end(), defaults.begin(), defaults.end());

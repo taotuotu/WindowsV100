@@ -143,8 +143,8 @@ std::string serve_usage_text(const char* argv0) {
            "       Windows defaults: model "
            "models/qwen3_8_27b_nvfp4_v2.ninfer, "
            "host 127.0.0.1, port 8110, alias qwen3.8-27b, CUDA device auto (SM70, >=30 GiB), "
-           "context/KV 8192, "
-           "concurrency 1, prefill chunk 512, bf16 KV, MTP draft width 3 with optimized head, "
+           "context/KV 143600, "
+           "concurrency 1, prefill chunk 2048, bf16 KV, MTP draft width 6 with optimized head, "
            "thinking off, prefix reuse on, temperature 0, seed 123. Request sampling fields "
            "may override process defaults.\n"
            "       --device auto selects the first CUDA SM70 device with at least 30 GiB total memory; "
@@ -157,6 +157,10 @@ std::string serve_usage_text(const char* argv0) {
 ServeOptions parse_serve_options(int argc, char** argv) {
     ServeOptions options;
 #if defined(NINFER_WINDOWS_SERVE)
+    options.max_context                                 = 143600;
+    options.kv_capacity = KvCapacityPolicy::explicit_capacity(options.max_context);
+    options.prefill_chunk                               = 2048;
+    options.speculative.draft_tokens                     = 6;
     options.device                                      = -1;
     options.context_cache.device_state_slots                = 1;
     options.context_cache.host_state_slots                  = 8;

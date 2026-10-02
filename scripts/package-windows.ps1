@@ -294,9 +294,10 @@ function Write-ReleaseManifest {
         }
         public_defaults = [ordered]@{
             device = 'auto (first SM70 device with at least 30 GiB)'
-            context_tokens = 8192
+            context_tokens = 143600
             kv_dtype = 'bf16'
-            mtp_draft_tokens = 3
+            mtp_draft_tokens = 6
+            prefill_chunk_tokens = 2048
             max_concurrency = 1
         }
     }
