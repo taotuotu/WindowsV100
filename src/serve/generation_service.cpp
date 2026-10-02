@@ -263,8 +263,10 @@ private:
 
 } // namespace
 
-GenerationService::GenerationService(ServeOptions options, StartupObserver startup_observer)
-    : options_(std::move(options)) {
+GenerationService::GenerationService(ServeOptions options, StartupObserver startup_observer,
+                                     std::function<void(std::string_view)> cache_failure_observer)
+    : options_(std::move(options)),
+      cache_failure_observer_(std::move(cache_failure_observer)) {
 #if defined(NINFER_WINDOWS_SERVE)
     if (options_.max_concurrency != 1) {
         throw std::invalid_argument("the Windows server accepts one inference request at a time");
@@ -296,6 +298,34 @@ GenerationService::GenerationService(ServeOptions options, StartupObserver start
         1);
 #else
         static_cast<std::size_t>(options_.max_concurrency) + options_.max_pending_requests);
+#endif
+#if defined(NINFER_WINDOWS_SERVE)
+    const auto& actual = engine_->options();
+    const auto load = engine_->load_summary();
+    // Disk snapshots currently have a physical implementation for the registered dense 27B
+    // Program. Other targets keep their existing in-memory cache route.
+    const bool supported_target = load.model_id == "qwen3.6-27b" || load.model_id == "qwen3.8-27b";
+    const bool supported_backend = actual.speculative.backend == SpeculativeBackend::None ||
+                                   actual.speculative.backend == SpeculativeBackend::Mtp;
+    const bool supported_kv = actual.kv_cache == KvCacheStorage::BFloat16 ||
+                              actual.kv_cache == KvCacheStorage::Int8Group64 ||
+                              actual.kv_cache == KvCacheStorage::Fp8E4M3Row256;
+    if (!options_.context_disk_cache_directory.empty() && options_.allow_prefix_reuse &&
+        actual.context_cache.enabled &&
+        supported_target && supported_backend && supported_kv) {
+        disk_cache_ = std::make_unique<SessionCacheStore>(
+            SessionCacheStoreOptions{.directory = options_.context_disk_cache_directory,
+                                     .max_bytes = options_.context_disk_cache_bytes,
+                                     .max_sessions = options_.context_disk_cache_sessions},
+            SessionCacheIdentity{.artifact_path = actual.artifact_path,
+                                 .model_id = load.model_id,
+                                 .weights_id = load.weights_id,
+                                 .vision_enabled = actual.enable_vision,
+                                 .kv_dtype = actual.kv_cache,
+                                 .speculative_backend = actual.speculative.backend,
+                                 .draft_tokens = actual.speculative.draft_tokens,
+                                 .proposal_head = actual.speculative.proposal_head});
+    }
 #endif
 }
 
@@ -443,12 +473,18 @@ PreparedRequest GenerationService::prepare_impl(const GenerationRequest& request
             if (changed) {
                 // A fully prepared/validated request may replace the current owner's cache.
                 engine_->clear_context_cache();
+                if (disk_cache_) {
+                    (void)disk_cache_->restore(*engine_, *requested_session, [&] {
+                        check_preparation_control(prepared.lifetime->deadline, is_cancelled);
+                    });
+                }
                 std::lock_guard lock(request_capacity_->mutex);
                 request_capacity_->cache_session = *requested_session;
                 request_capacity_->cache_owner = requested_session->starts_with("client:web-")
                                                      ? "web" : "api";
                 ++request_capacity_->cache_switch_count;
             }
+            prepared.cache_session = *requested_session;
         }
 #endif
         prepared.prompt_tokens = static_cast<int>(prompt.summary().prompt_tokens);
@@ -525,9 +561,43 @@ GenerationOutcome GenerationService::run(PreparedRequest& prepared, const Stream
     });
 
     ninfer::GenerationResult result;
+#if defined(NINFER_WINDOWS_SERVE)
+    const auto save_terminal_cache = [&] {
+        if (!disk_cache_ || !prepared.cache_session) { return; }
+        // wait() also settles the Engine's terminal state before rethrowing a stream consumer
+        // exception. Save in that path too: a disconnected socket must not bypass persistence.
+        try {
+            const bool saved = disk_cache_->save(*engine_, *prepared.cache_session);
+            if (!saved && disk_cache_->snapshot_stats().last_error_code == "no_checkpoint" &&
+                engine_->is_available()) {
+                // An unsafe provisional cancellation may have consumed the in-memory endpoint.
+                // Restore the previous complete session snapshot now, so a same-owner next turn
+                // does not need a session switch to recover it. A missing file keeps RAM intact.
+                (void)disk_cache_->restore(*engine_, *prepared.cache_session, {}, true);
+            }
+        }
+        catch (const std::exception& exception) {
+            if (cache_failure_observer_) {
+                try { cache_failure_observer_(exception.what()); } catch (...) {}
+            }
+            // Persistence diagnostics remain visible without replacing the answer/transport
+            // error. The previous atomically committed generation is retained on failure.
+        }
+    };
+#endif
     try {
         result = prepared.generation.wait(public_sink, cancellation);
-    } catch (const ninfer::RequestError& exception) { throw_request_error(exception); }
+    } catch (const ninfer::RequestError& exception) {
+#if defined(NINFER_WINDOWS_SERVE)
+        save_terminal_cache();
+#endif
+        throw_request_error(exception);
+    } catch (...) {
+#if defined(NINFER_WINDOWS_SERVE)
+        save_terminal_cache();
+#endif
+        throw;
+    }
     GenerationOutcome outcome;
     outcome.text                = std::move(result.content);
     outcome.reasoning           = std::move(result.reasoning);
@@ -565,6 +635,10 @@ GenerationOutcome GenerationService::run(PreparedRequest& prepared, const Stream
 
     outcome.tool_calls      = std::move(result.tool_calls);
     outcome.tool_call_parse = result.tool_call_parse;
+#if defined(NINFER_WINDOWS_SERVE)
+    // The HTTP reservation remains held during the commit; client cancellation must not cancel it.
+    save_terminal_cache();
+#endif
     return outcome;
 }
 
@@ -580,9 +654,17 @@ ContextSessionInfo GenerationService::context_session_info() const {
             .switch_count = request_capacity_->cache_switch_count};
 }
 
+SessionCacheStoreStats GenerationService::disk_cache_stats() const {
+    if (disk_cache_) { return disk_cache_->snapshot_stats(); }
+    SessionCacheStoreStats stats;
+    stats.last_error_code = "disabled";
+    return stats;
+}
+
 void GenerationService::clear_context_cache() const {
     auto reservation = acquire_request_lifetime(DeadlinePolicy::ClientPendingTimeout);
     engine_->clear_context_cache();
+    if (disk_cache_) { disk_cache_->clear(); }
     std::lock_guard lock(request_capacity_->mutex);
     request_capacity_->cache_session.clear();
     request_capacity_->cache_owner = "none";

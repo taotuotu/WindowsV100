@@ -10,6 +10,12 @@ param(
     [int]$Port,
     [string]$ApiKey,
     [switch]$Vision,
+    [switch]$NoDiskCache,
+    [string]$DiskCacheDirectory,
+    [ValidateRange(1, 17592186044415)]
+    [long]$DiskCacheMiB,
+    [ValidateRange(1, 128)]
+    [int]$DiskCacheSessions,
     [string]$RequestLog,
     [switch]$Stop,
     [switch]$OpenChat,
@@ -60,6 +66,25 @@ $PrefillChunk = [int](Get-EffectiveSetting 'PrefillChunk' $PrefillChunk 2048)
 $ListenHost = [string](Get-EffectiveSetting 'ListenHost' $ListenHost '127.0.0.1')
 $Port = [int](Get-EffectiveSetting 'Port' $Port 8110)
 $ApiKey = [string](Get-EffectiveSetting 'ApiKey' $ApiKey '')
+$DiskCacheDirectory = [string](Get-EffectiveSetting 'DiskCacheDirectory' $DiskCacheDirectory (Join-Path $repoRoot '.local\context-cache'))
+$DiskCacheMiB = [long](Get-EffectiveSetting 'DiskCacheMiB' $DiskCacheMiB 32768)
+$DiskCacheSessions = [int](Get-EffectiveSetting 'DiskCacheSessions' $DiskCacheSessions 8)
+$diskCacheValue = Get-EffectiveSetting 'DiskCache' $true $true
+if ($diskCacheValue -isnot [bool]) {
+    throw 'DiskCache in .local\windows-server.psd1 must be $true or $false; use -NoDiskCache to disable it for one launch.'
+}
+$DiskCacheEnabled = [bool]$diskCacheValue -and -not $NoDiskCache
+$diskCacheDirectoryExplicit = $explicitNames.ContainsKey('DiskCacheDirectory')
+if ([string]::IsNullOrWhiteSpace($DiskCacheDirectory)) {
+    if ($DiskCacheEnabled) { throw 'DiskCacheDirectory must not be empty while disk caching is enabled.' }
+    $DiskCacheDirectory = Join-Path $repoRoot '.local\context-cache'
+}
+if (-not [System.IO.Path]::IsPathRooted($DiskCacheDirectory)) {
+    $diskCacheBase = if ($diskCacheDirectoryExplicit) { (Get-Location).Path } else { $repoRoot }
+    $DiskCacheDirectory = [System.IO.Path]::GetFullPath((Join-Path $diskCacheBase $DiskCacheDirectory))
+} else {
+    $DiskCacheDirectory = [System.IO.Path]::GetFullPath($DiskCacheDirectory)
+}
 $visionValue = Get-EffectiveSetting 'Vision' $Vision $false
 if ($visionValue -is [System.Management.Automation.SwitchParameter]) {
     $VisionEnabled = $visionValue.IsPresent
@@ -91,6 +116,12 @@ if ($DraftTokens -lt 1 -or $DraftTokens -gt 7) {
 }
 if ($PrefillChunk -lt 128 -or $PrefillChunk -gt 65536 -or ($PrefillChunk % 128) -ne 0) {
     throw 'PrefillChunk must be a multiple of 128 between 128 and 65536.'
+}
+if ($DiskCacheMiB -lt 1 -or $DiskCacheMiB -gt 17592186044415) {
+    throw 'DiskCacheMiB must be between 1 and 17592186044415.'
+}
+if ($DiskCacheSessions -lt 1 -or $DiskCacheSessions -gt 128) {
+    throw 'DiskCacheSessions must be between 1 and 128.'
 }
 if ([string]::IsNullOrWhiteSpace($ListenHost)) { throw 'ListenHost must not be empty.' }
 if ($Port -lt 1 -or $Port -gt 65535) { throw 'Port must be between 1 and 65535.' }
@@ -246,6 +277,8 @@ function Get-NInferServiceProbe {
         ModelListAvailable = $false
         ModelIds = @()
         ModelsAuthStatusCode = $null
+        ModelInfoAvailable = $false
+        DiskCacheEnabled = $null
         VisionEnabled = $null
     }
     try {
@@ -274,6 +307,11 @@ function Get-NInferServiceProbe {
             $modelInfo = Invoke-RestMethod -Uri "$ServiceUri/ui/model-info" -Headers @{ Authorization = "Bearer $ProbeApiKey" } -TimeoutSec 2
         } else {
             $modelInfo = Invoke-RestMethod -Uri "$ServiceUri/ui/model-info" -TimeoutSec 2
+        }
+        $result.ModelInfoAvailable = $true
+        $diskCacheProperty = $modelInfo.PSObject.Properties['disk_cache_enabled']
+        if ($null -ne $diskCacheProperty -and $diskCacheProperty.Value -is [bool]) {
+            $result.DiskCacheEnabled = $diskCacheProperty.Value
         }
         $visionProperty = $modelInfo.PSObject.Properties['vision_enabled']
         if ($null -ne $visionProperty -and $visionProperty.Value -is [bool]) {
@@ -335,6 +373,10 @@ if ($OpenChat -and $ServerArguments) {
         if ($argument -eq '--vision') {
             throw 'In -OpenChat mode, use the launcher -Vision switch instead of a raw --vision server argument.'
         }
+        if ($argument -in @('--context-disk-cache', '--no-context-disk-cache', '--context-disk-cache-mib', '--context-disk-cache-sessions') -or
+            $argument -match '^--(?:no-)?context-disk-cache(?:-mib|-sessions)?=') {
+            throw 'In -OpenChat mode, use -NoDiskCache, -DiskCacheDirectory, -DiskCacheMiB, and -DiskCacheSessions so readiness checks match the running service.'
+        }
         if ($argument -match '^(--model-id)=(.*)$') {
             throw 'In -OpenChat mode, pass --model-id and its value as separate server arguments.'
         }
@@ -374,9 +416,15 @@ try {
 }
 if ($portOpen) {
     if ($healthOk -and $existingIds -contains $modelAlias) {
-        if ($OpenChat) {
-            Assert-NInferListenerExecutable -HostName $listenArgument -LocalPort $Port -ExpectedExecutable $serverExe
+        if (-not $initialProbe.ModelInfoAvailable -or $null -eq $initialProbe.DiskCacheEnabled) {
+            throw ('The healthy service at {0} does not report disk_cache_enabled in /ui/model-info. Stop it with stop-ninfer.bat and start it again with this launcher; the older service cannot be assumed to support disk session recovery.' -f $baseUri)
         }
+        if ($initialProbe.DiskCacheEnabled -ne $DiskCacheEnabled) {
+            $diskCacheState = if ($DiskCacheEnabled) { 'enabled' } else { 'disabled' }
+            throw ('The healthy service at {0} has a different disk-cache setting. It was left running. Run stop-ninfer.bat, then restart with disk caching {1}.' -f
+                $baseUri, $diskCacheState)
+        }
+        if ($OpenChat) { Assert-NInferListenerExecutable -HostName $listenArgument -LocalPort $Port -ExpectedExecutable $serverExe }
         if ($VisionEnabled -and $initialProbe.VisionEnabled -ne $true) {
             $visionState = if ($null -eq $initialProbe.VisionEnabled) { 'missing or unavailable' } else { 'disabled' }
             throw ('The healthy NInfer service at {0} serves {1}, but vision_enabled is {2}. It was left running. Run stop-ninfer.bat, then start-ninfer.bat -Vision.' -f
@@ -452,6 +500,13 @@ $serverArgs += @(
     '--prefill-chunk', "$PrefillChunk"
 )
 if ($ApiKey) { $serverArgs += @('--api-key', $ApiKey) }
+if ($DiskCacheEnabled) {
+    $serverArgs += @('--context-disk-cache', $DiskCacheDirectory)
+} else {
+    $serverArgs += '--no-context-disk-cache'
+}
+$serverArgs += @('--context-disk-cache-mib', "$DiskCacheMiB",
+                 '--context-disk-cache-sessions', "$DiskCacheSessions")
 if (-not [string]::IsNullOrWhiteSpace($RequestLog)) {
     if (-not [System.IO.Path]::IsPathRooted($RequestLog)) {
         $RequestLog = Join-Path $repoRoot $RequestLog
@@ -498,6 +553,26 @@ try {
                     throw (Get-ModelsAuthorizationError -ConfiguredApiKey $ApiKey -StatusCode $probe.ModelsAuthStatusCode)
                 }
                 $healthyExpectedModel = $probeHealthy -and ($probeIds -contains $modelAlias)
+                if ($healthyExpectedModel -and $probe.ModelInfoAvailable -and $null -eq $probe.DiskCacheEnabled) {
+                    Assert-NInferListenerExecutable -HostName $listenArgument -LocalPort $Port -ExpectedExecutable $serverExe
+                    throw ('The healthy service at {0} does not report disk_cache_enabled in /ui/model-info. Stop it with stop-ninfer.bat and start it again with this launcher; the older service cannot be assumed to support disk session recovery.' -f $baseUri)
+                }
+                if ($healthyExpectedModel -and $probe.ModelInfoAvailable -and
+                    $null -ne $probe.DiskCacheEnabled -and $probe.DiskCacheEnabled -ne $DiskCacheEnabled) {
+                    Assert-NInferListenerExecutable -HostName $listenArgument -LocalPort $Port -ExpectedExecutable $serverExe
+                    if ($startedServerProcess) {
+                        $requestedCache = if ($DiskCacheEnabled) { 'enabled' } else { 'disabled' }
+                        throw ('This launch requested disk caching {0}, but /ui/model-info reports a different setting at {1}.' -f
+                            $requestedCache, $baseUri)
+                    }
+                    $diskCacheState = if ($DiskCacheEnabled) { 'enabled' } else { 'disabled' }
+                    throw ('The healthy NInfer service at {0} has a different disk-cache setting. It was left running. Run stop-ninfer.bat, then restart with disk caching {1}.' -f
+                        $baseUri, $diskCacheState)
+                }
+                if ($healthyExpectedModel -and -not $probe.ModelInfoAvailable -and -not $startedServerProcess) {
+                    Assert-NInferListenerExecutable -HostName $listenArgument -LocalPort $Port -ExpectedExecutable $serverExe
+                    throw ('The healthy service at {0} does not provide /ui/model-info, so disk-cache support cannot be verified. Stop it with stop-ninfer.bat and start it again with this launcher.' -f $baseUri)
+                }
                 if ($healthyExpectedModel -and $VisionEnabled -and $probe.VisionEnabled -ne $true) {
                     Assert-NInferListenerExecutable -HostName $listenArgument -LocalPort $Port -ExpectedExecutable $serverExe
                     if ($probe.VisionEnabled -eq $false -and $startedServerProcess) {
@@ -521,7 +596,9 @@ try {
                     Start-Sleep -Milliseconds 1000
                     continue
                 }
-                $ready = $healthyExpectedModel -and (-not $VisionEnabled -or $probe.VisionEnabled -eq $true)
+                $ready = $healthyExpectedModel -and $probe.ModelInfoAvailable -and
+                         ($probe.DiskCacheEnabled -eq $DiskCacheEnabled) -and
+                         (-not $VisionEnabled -or $probe.VisionEnabled -eq $true)
                 if ($ready) {
                     Assert-NInferListenerExecutable -HostName $listenArgument -LocalPort $Port -ExpectedExecutable $serverExe
                     Write-Host "NInfer is ready with model $modelAlias at $baseUri."
@@ -678,9 +755,9 @@ try {
 
                 if ([DateTime]::UtcNow -ge $readyDeadline) {
                     $readinessRequirement = if ($VisionEnabled) {
-                        'health, model alias, and vision_enabled=true'
+                        'health, model alias, disk_cache_enabled, and vision_enabled=true'
                     } else {
-                        'health and model alias'
+                        'health, model alias, and disk_cache_enabled'
                     }
                     throw ('Timed out after {0} seconds waiting for NInfer {1} at {2}.' -f
                         $ReadyTimeoutSeconds, $readinessRequirement, $baseUri)

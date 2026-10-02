@@ -1,11 +1,16 @@
 #pragma once
 
+#include "ninfer/context_cache.h"
 #include <ninfer/targets/qwen3_6/state_image.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <limits>
+#include <new>
 #include <optional>
+#include <span>
 #include <stdexcept>
+#include <cstring>
 #include <utility>
 #include <vector>
 
@@ -185,6 +190,12 @@ public:
         return handle.index_;
     }
 
+    // Stable only for one in-process archive transaction; never serialized as an object ID.
+    [[nodiscard]] std::uint64_t archive_key(StateImageHandle handle) const {
+        const Object& object = require(handle);
+        return (static_cast<std::uint64_t>(handle.index_) << 32U) | object.generation;
+    }
+
     [[nodiscard]] StateImageRole role(StateImageHandle handle) const {
         return require(handle).role;
     }
@@ -207,6 +218,94 @@ public:
 
     [[nodiscard]] std::uint32_t checkpoint_references(StateImageHandle handle) const {
         return require(handle).checkpoint_references;
+    }
+
+    [[nodiscard]] std::optional<StateImageHandle>
+    reserve_import_destination(bool with_device) noexcept {
+        return allocate(StateImageRole::ReservedDestination, with_device);
+    }
+
+    void restore_import_payload(StateImageHandle handle, std::span<const std::byte> payload,
+                                bool device_replica, bool host_replica,
+                                cudaStream_t stream = nullptr) {
+        Object& object = require(handle);
+        const std::size_t image_bytes = device_->host_layout().image_bytes;
+        if (object.role != StateImageRole::ReservedDestination || object.checkpoint_references != 0 ||
+            object.source_pins != 0 || object.destination_pinned || has_pending_replica(object) ||
+            payload.size() != image_bytes || (!device_replica && !host_replica) ||
+            (device_replica != object.device_slot.has_value())) {
+            throw std::invalid_argument("StateImage snapshot destination or payload is invalid");
+        }
+        if (host_replica) {
+            if (host_ == nullptr) { throw std::bad_alloc(); }
+            const auto target = host_->allocate();
+            if (!target) { throw std::bad_alloc(); }
+            object.host_slot = *target;
+            std::memcpy(host_->writable_view(*target).data, payload.data(), payload.size());
+        }
+        if (device_replica) {
+            device_->copy_from_host(
+                HostStateImageConstView{.data = payload.data(), .layout = &device_->host_layout()},
+                *object.device_slot, stream);
+            const cudaError_t status = cudaStreamSynchronize(stream);
+            if (status != cudaSuccess) {
+                throw std::runtime_error("StateImage snapshot H2D transfer failed");
+            }
+        }
+    }
+
+    void publish_imported_checkpoint(StateImageHandle handle,
+                                     std::uint32_t checkpoint_references,
+                                     bool has_primary_owner) noexcept {
+        if (!valid(handle) || (checkpoint_references == 0 && !has_primary_owner)) {
+            std::terminate();
+        }
+        Object& object = objects_[handle.index_];
+        if (object.role != StateImageRole::ReservedDestination ||
+            object.checkpoint_references != 0 || object.source_pins != 0 ||
+            object.destination_pinned || has_pending_replica(object) ||
+            (!object.device_slot && !object.host_slot)) {
+            std::terminate();
+        }
+        object.content_epoch = next_epoch();
+        object.checkpoint_references = checkpoint_references;
+        object.role = StateImageRole::CheckpointImmutable;
+    }
+
+    void copy_snapshot_payload(StateImageHandle handle, std::span<std::byte> destination,
+                               cudaStream_t stream = nullptr) const {
+        const Object& object = require(handle);
+        const std::size_t image_bytes = device_->host_layout().image_bytes;
+        if (object.role != StateImageRole::CheckpointImmutable || has_pending_replica(object) ||
+            object.source_pins != 0 || object.destination_pinned ||
+            destination.size() != image_bytes || (!object.device_slot && !object.host_slot)) {
+            throw ninfer::ContextCacheOwnershipError(
+                "StateImage snapshot source is not a stable immutable checkpoint");
+        }
+        std::fill(destination.begin(), destination.end(), std::byte{0});
+        if (object.host_slot) {
+            const HostStateImageConstView view = host_->view(*object.host_slot);
+            const StateImageHostLayout& layout = *view.layout;
+            const auto copy_region = [&](const LayoutRegion& region) {
+                std::memcpy(destination.data() + region.offset, view.data + region.offset,
+                            region.bytes);
+            };
+            copy_region(layout.linear_conv);
+            copy_region(layout.linear_recurrent);
+            copy_region(layout.continuation_hidden);
+            if (layout.dflash_local_k) { copy_region(*layout.dflash_local_k); }
+            if (layout.dflash_local_v) { copy_region(*layout.dflash_local_v); }
+            return;
+        }
+        device_->copy_to_host(*object.device_slot,
+                              HostStateImageView{.data = destination.data(),
+                                                 .layout = &device_->host_layout()},
+                              stream);
+        const cudaError_t status = cudaStreamSynchronize(stream);
+        if (status != cudaSuccess) {
+            throw ninfer::ContextCacheOwnershipError(
+                "StateImage snapshot D2H transfer failed");
+        }
     }
 
     void retain_checkpoint_reference(StateImageHandle handle) {

@@ -351,6 +351,63 @@ public:
         return LogicalKVPageHandle(this, index, page.generation);
     }
 
+    [[nodiscard]] LogicalKVPageHandle materialize_host_import_destination(
+        std::uint32_t committed_columns) {
+        if (committed_columns == 0 ||
+            committed_columns > static_cast<std::uint32_t>(kPagedKVPageSize) || free_count_ == 0) {
+            throw std::invalid_argument("logical KV Host import destination is invalid");
+        }
+        const std::uint32_t index = free_[--free_count_];
+        Page& page = pages_[index];
+        page.content_epoch = next_epoch(page.content_epoch);
+        page.committed_columns = committed_columns;
+        page.references = 0;
+        page.active_references = 0;
+        page.writer_references = 0;
+        page.protected_columns = 0;
+        page.source_pins = 0;
+        page.destination_pinned = true;
+        page.occupied = true;
+        return LogicalKVPageHandle(this, index, page.generation);
+    }
+
+    [[nodiscard]] std::uint64_t archive_key(LogicalKVPageHandle handle) const {
+        const Page& page = require(handle);
+        return (static_cast<std::uint64_t>(handle.index_) << 32U) | page.generation;
+    }
+
+    void publish_imported_page(LogicalKVPageHandle handle, std::uint32_t references) noexcept {
+        if (!valid(handle) || references == 0) { std::terminate(); }
+        Page& page = pages_[handle.index_];
+        if (!page.destination_pinned || page.references != 0 || page.writer_references != 0 ||
+            page.active_references != 0 || page.source_pins != 0 ||
+            page.pending_device_replica || (!page.device_replica && !page.host_replica)) {
+            std::terminate();
+        }
+        page.references = references;
+        page.destination_pinned = false;
+    }
+
+    void abort_import_destination(LogicalKVPageHandle handle,
+                                  DeviceKVPageReservation& reservation) noexcept {
+        if (!valid(handle)) { return; }
+        Page& page = pages_[handle.index_];
+        if (!page.destination_pinned || page.references != 0 || page.writer_references != 0 ||
+            page.active_references != 0 || page.source_pins != 0 || page.host_replica ||
+            page.pending_device_replica) {
+            return;
+        }
+        if (page.device_replica) {
+            try {
+                physical_->dematerialize_one(reservation, std::move(*page.device_replica));
+            } catch (...) {
+                std::terminate();
+            }
+            page.device_replica.reset();
+        }
+        release_descriptor(handle, page);
+    }
+
     void publish_transfer_destination(LogicalKVPageHandle handle, bool writer) noexcept {
         if (!valid(handle)) { std::terminate(); }
         Page& page = pages_[handle.index_];
@@ -429,6 +486,15 @@ public:
 
     [[nodiscard]] std::uint8_t writer_references(LogicalKVPageHandle handle) const {
         return require(handle).writer_references;
+    }
+
+    [[nodiscard]] bool stable_for_snapshot(LogicalKVPageHandle handle) const noexcept {
+        if (!valid(handle)) { return false; }
+        const Page& page = pages_[handle.index_];
+        return page.references != 0 && page.active_references == 0 &&
+               page.writer_references == 0 && page.source_pins == 0 &&
+               !page.destination_pinned && !page.pending_device_replica &&
+               (page.device_replica.has_value() || page.host_replica.has_value());
     }
 
     [[nodiscard]] std::uint32_t protected_columns(LogicalKVPageHandle handle) const {
@@ -884,6 +950,57 @@ public:
         }
         address.occupied = true;
         return KVAddressSpaceHandle(this, index, address.generation);
+    }
+
+    // Installs an inactive archive address after every linked page has been materialized. Page
+    // reference totals are adopted by the archive-wide import transaction, so this method adds no
+    // references of its own.
+    void install_imported(KVAddressSpaceHandle handle, std::uint32_t frontier,
+                          std::span<const LogicalKVPageHandle> ordered_pages) {
+        Address& address = require(handle);
+        if (address.active || address.row || address.reservation.valid() ||
+            address.page_count != 0 || address.committed_frontier != 0 ||
+            ordered_pages.size() != pages_for_tokens(frontier)) {
+            throw std::invalid_argument("KV imported address-space shape is invalid");
+        }
+        for (std::uint32_t page_index = 0; page_index < ordered_pages.size(); ++page_index) {
+            const LogicalKVPageHandle page = ordered_pages[page_index];
+            const std::uint32_t begin = page_index * static_cast<std::uint32_t>(kPagedKVPageSize);
+            const std::uint32_t needed =
+                std::min(static_cast<std::uint32_t>(kPagedKVPageSize), frontier - begin);
+            if (!pages_->valid(page) || pages_->committed_columns(page) < needed ||
+                pages_->writer_references(page) != 0 ||
+                (!pages_->device_resident(page) && !pages_->host_resident(page))) {
+                throw std::invalid_argument("KV imported address references an incomplete page");
+            }
+            for (std::uint32_t previous = 0; previous < page_index; ++previous) {
+                if (ordered_pages[previous] == page) {
+                    throw std::invalid_argument("KV imported address repeats one logical page");
+                }
+            }
+        }
+        const std::size_t address_index = static_cast<std::size_t>(&address - addresses_.data());
+        LogicalKVPageHandle* destination =
+            memberships_.data() + address_index * page_capacity_;
+        std::copy(ordered_pages.begin(), ordered_pages.end(), destination);
+        address.page_count = static_cast<std::uint32_t>(ordered_pages.size());
+        address.committed_frontier = frontier;
+        address.checkpoint_frontier = frontier;
+        rebuild_checkpoint_protection();
+    }
+
+    [[nodiscard]] bool rollback_imported(KVAddressSpaceHandle handle) noexcept {
+        if (!valid(handle)) { return false; }
+        Address& address = addresses_[handle.index_];
+        if (address.active || address.row || address.reservation.valid()) { return false; }
+        for (std::uint32_t page = 0; page < address.page_count; ++page) {
+            membership(address, page) = {};
+        }
+        address.page_count = 0;
+        address.committed_frontier = 0;
+        address.checkpoint_frontier = 0;
+        rebuild_checkpoint_protection();
+        return true;
     }
 
     [[nodiscard]] bool valid(KVAddressSpaceHandle handle) const noexcept {
@@ -1637,6 +1754,10 @@ public:
 
     [[nodiscard]] std::uint32_t committed_frontier(KVAddressSpaceHandle handle) const {
         return require(handle).committed_frontier;
+    }
+
+    [[nodiscard]] std::uint32_t checkpoint_frontier(KVAddressSpaceHandle handle) const {
+        return require(handle).checkpoint_frontier;
     }
 
     [[nodiscard]] std::int32_t bound_row(KVAddressSpaceHandle handle) const noexcept {

@@ -25,6 +25,26 @@ public:
 
     [[nodiscard]] std::size_t size() const noexcept { return token_types_.size(); }
 
+    [[nodiscard]] const std::vector<std::uint8_t>& token_types() const noexcept {
+        return token_types_;
+    }
+    [[nodiscard]] const std::array<std::vector<std::int32_t>, 3>& positions() const noexcept {
+        return positions_;
+    }
+    [[nodiscard]] const std::vector<VisionItem>& vision_items() const noexcept {
+        return vision_items_;
+    }
+    [[nodiscard]] const std::vector<std::uint32_t>& rewrite_execution_frontiers() const noexcept {
+        return rewrite_execution_frontiers_;
+    }
+
+    // Restores the full exact identity carried by a physical context-cache snapshot. Inputs are
+    // validated before they become visible through this object.
+    void assign_snapshot(std::vector<std::uint8_t> token_types,
+                        std::array<std::vector<std::int32_t>, 3> positions,
+                        std::vector<VisionItem> vision_items,
+                        std::vector<std::uint32_t> rewrite_execution_frontiers);
+
     [[nodiscard]] bool matches(const PreparedPromptData& prompt, std::size_t count) const;
     [[nodiscard]] bool equals(const ResidentPrefixIdentity& other) const;
     [[nodiscard]] bool prefix_equals(const ResidentPrefixIdentity& other, std::size_t count) const;
@@ -48,6 +68,11 @@ public:
     void append_generated(std::span<const TokenId> tokens, std::int32_t rope_delta,
                           std::optional<std::uint32_t> execution_split_after = std::nullopt);
     void truncate(std::size_t tokens);
+
+    // Recompute shortlist values from exact persisted content. Digests are not accepted from disk
+    // as identity proofs.
+    void assign_snapshot(std::span<const TokenId> tokens,
+                         const ResidentPrefixIdentity& identity);
 
     [[nodiscard]] std::size_t size() const noexcept {
         return digests_.empty() ? 0 : digests_.size() - 1U;

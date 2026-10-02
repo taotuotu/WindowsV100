@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cmath>
 #include <iterator>
 #include <limits>
 #include <stdexcept>
@@ -157,6 +158,51 @@ void ResidentPrefixIdentity::assign(const PreparedPromptData& prompt) {
     }
     vision_items_                = prompt.vision_items;
     rewrite_execution_frontiers_ = prompt.identity.rewrite_execution_frontiers;
+}
+
+void ResidentPrefixIdentity::assign_snapshot(
+    std::vector<std::uint8_t> token_types,
+    std::array<std::vector<std::int32_t>, 3> positions,
+    std::vector<VisionItem> vision_items,
+    std::vector<std::uint32_t> rewrite_execution_frontiers) {
+    const std::size_t tokens = token_types.size();
+    for (const auto& axis : positions) {
+        if (axis.size() != tokens) {
+            throw std::invalid_argument("snapshot prefix identity has an invalid position shape");
+        }
+    }
+    std::uint32_t previous_rewrite = 0;
+    for (const std::uint32_t frontier : rewrite_execution_frontiers) {
+        if (frontier == 0 || frontier > tokens || frontier <= previous_rewrite) {
+            throw std::invalid_argument("snapshot rewrite frontiers are invalid");
+        }
+        previous_rewrite = frontier;
+    }
+
+    std::size_t previous_vision_end = 0;
+    for (const VisionItem& item : vision_items) {
+        const std::size_t end = checked_vision_end(item, tokens);
+        if (item.modality != PromptModality::Image && item.modality != PromptModality::Video) {
+            throw std::invalid_argument("snapshot Vision item has an unknown modality");
+        }
+        if (item.grid.temporal <= 0 || item.grid.height <= 0 || item.grid.width <= 0 ||
+            item.patch_count == 0 ||
+            item.patch_begin > std::numeric_limits<std::size_t>::max() - item.patch_count ||
+            item.token_spans.front().begin < previous_vision_end) {
+            throw std::invalid_argument("snapshot Vision item metadata is invalid");
+        }
+        for (const double timestamp : item.timestamps) {
+            if (!std::isfinite(timestamp)) {
+                throw std::invalid_argument("snapshot Vision timestamp is not finite");
+            }
+        }
+        previous_vision_end = end;
+    }
+
+    token_types_ = std::move(token_types);
+    positions_ = std::move(positions);
+    vision_items_ = std::move(vision_items);
+    rewrite_execution_frontiers_ = std::move(rewrite_execution_frontiers);
 }
 
 void ResidentPrefixIdentity::swap(ResidentPrefixIdentity& other) noexcept {
@@ -346,6 +392,45 @@ void PrefixShortlistDigests::assign(const PreparedPromptData& prompt) {
     }
     if (next_vision != prompt.vision_items.size()) {
         throw std::invalid_argument("Vision shortlist item exceeds the prompt");
+    }
+}
+
+void PrefixShortlistDigests::assign_snapshot(std::span<const TokenId> tokens,
+                                             const ResidentPrefixIdentity& identity) {
+    if (tokens.size() != identity.size()) {
+        throw std::invalid_argument("snapshot shortlist tokens do not match exact identity");
+    }
+    digests_.clear();
+    reserve(tokens.size());
+    digests_.push_back(kDigestOffset);
+
+    const auto& positions = identity.positions();
+    const auto& rewrites = identity.rewrite_execution_frontiers();
+    const auto& vision = identity.vision_items();
+    std::size_t next_rewrite = 0;
+    std::size_t next_vision = 0;
+    std::size_t next_vision_end =
+        vision.empty() ? 0 : checked_vision_end(vision.front(), tokens.size());
+    for (std::size_t index = 0; index < tokens.size(); ++index) {
+        const std::array<std::int32_t, 3> position{positions[0][index], positions[1][index],
+                                                   positions[2][index]};
+        append_digest(digests_, tokens[index], identity.token_types()[index], position, rewrites,
+                      next_rewrite);
+        const std::size_t frontier = index + 1U;
+        while (next_vision < vision.size() && next_vision_end == frontier) {
+            mix_vision_item(digests_.back(), vision[next_vision]);
+            ++next_vision;
+            if (next_vision < vision.size()) {
+                next_vision_end = checked_vision_end(vision[next_vision], tokens.size());
+                if (next_vision_end < frontier ||
+                    vision[next_vision].token_spans.front().begin < frontier) {
+                    throw std::invalid_argument("snapshot Vision items are not prefix ordered");
+                }
+            }
+        }
+    }
+    if (next_rewrite != rewrites.size() || next_vision != vision.size()) {
+        throw std::invalid_argument("snapshot shortlist identity is incomplete");
     }
 }
 

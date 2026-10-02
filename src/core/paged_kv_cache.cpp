@@ -659,6 +659,66 @@ void DeviceKVPagePool::copy_from_host(HostKVAllocationConstView source,
     }
 }
 
+void DeviceKVPagePool::copy_page_to_host(DeviceKVPageHandle source,
+                                         std::span<std::byte> destination,
+                                         cudaStream_t stream) const {
+    const std::int32_t page = physical_index(source);
+    const HostKVPageLayout host = plan_host_kv_page_layout(geometry());
+    if (destination.size() != host.page_stride || host.planes.size() != planes_.size()) {
+        throw std::invalid_argument("Paged KV single-page D2H staging has the wrong geometry");
+    }
+    std::fill(destination.begin(), destination.end(), std::byte{0});
+    for (std::size_t plane_index = 0; plane_index < planes_.size(); ++plane_index) {
+        const Tensor& device_plane = planes_[plane_index];
+        const HostKVPlaneLayout& host_plane = host.planes[plane_index];
+        const auto* device_base = static_cast<const std::byte*>(device_plane.data);
+        std::byte* host_base = destination.data() + host_plane.offset;
+        if (geometry().device_plane_order == PagedKVPlaneOrder::PageMajor) {
+            CUDA_CHECK(cudaMemcpyAsync(
+                host_base,
+                device_base + static_cast<std::int64_t>(page) * device_plane.nb[3],
+                host_plane.page_payload_bytes, cudaMemcpyDeviceToHost, stream));
+        } else {
+            for (std::int32_t head = 0; head < device_plane.ne[3]; ++head) {
+                CUDA_CHECK(cudaMemcpyAsync(
+                    host_base + static_cast<std::size_t>(head) * host_plane.head_payload_bytes,
+                    device_base + static_cast<std::int64_t>(head) * device_plane.nb[3] +
+                        static_cast<std::int64_t>(page) * device_plane.nb[2],
+                    host_plane.head_payload_bytes, cudaMemcpyDeviceToHost, stream));
+            }
+        }
+    }
+}
+
+void DeviceKVPagePool::copy_page_from_host(std::span<const std::byte> source,
+                                           DeviceKVPageHandle destination,
+                                           cudaStream_t stream) const {
+    const std::int32_t page = physical_index(destination);
+    const HostKVPageLayout host = plan_host_kv_page_layout(geometry());
+    if (source.size() != host.page_stride || host.planes.size() != planes_.size()) {
+        throw std::invalid_argument("Paged KV single-page H2D staging has the wrong geometry");
+    }
+    for (std::size_t plane_index = 0; plane_index < planes_.size(); ++plane_index) {
+        const Tensor& device_plane = planes_[plane_index];
+        const HostKVPlaneLayout& host_plane = host.planes[plane_index];
+        const std::byte* host_base = source.data() + host_plane.offset;
+        auto* device_base = static_cast<std::byte*>(device_plane.data);
+        if (geometry().device_plane_order == PagedKVPlaneOrder::PageMajor) {
+            CUDA_CHECK(cudaMemcpyAsync(
+                device_base + static_cast<std::int64_t>(page) * device_plane.nb[3], host_base,
+                host_plane.page_payload_bytes, cudaMemcpyHostToDevice, stream));
+        } else {
+            for (std::int32_t head = 0; head < device_plane.ne[3]; ++head) {
+                CUDA_CHECK(cudaMemcpyAsync(
+                    device_base + static_cast<std::int64_t>(head) * device_plane.nb[3] +
+                        static_cast<std::int64_t>(page) * device_plane.nb[2],
+                    host_base + static_cast<std::size_t>(head) * host_plane.head_payload_bytes,
+                    host_plane.head_payload_bytes, cudaMemcpyHostToDevice, stream));
+            }
+        }
+    }
+}
+
 std::vector<DeviceKVPageReservation>
 reserve_device_kv_page_bundle(std::span<const DeviceKVPageReservationRequest> requests) {
     for (std::size_t index = 0; index < requests.size(); ++index) {

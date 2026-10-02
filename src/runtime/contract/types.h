@@ -201,6 +201,7 @@ enum class ConsumeStatus : std::uint8_t {
 enum class CommitDisposition : std::uint8_t {
     Active,
     Finishable,
+    CancelledFinishable,
     CancelledReleased,
 };
 

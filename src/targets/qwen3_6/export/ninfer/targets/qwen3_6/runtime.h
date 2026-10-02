@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ninfer/types.h"
+#include "ninfer/context_cache.h"
 #include "runtime/contract/types.h"
 #include <ninfer/targets/qwen3_6/prepared_prompt.h>
 
@@ -815,6 +816,64 @@ struct FinishResult {
 };
 
 template <class Variant>
+struct ImportedPrivateContextCacheOwner {
+    ContinuationHandle<Variant> handle;
+    ContinuationSummary summary;
+};
+
+template <class Variant>
+struct ImportedSharedContextCacheOwner {
+    SharedPrefixHandle<Variant> handle;
+    SharedPrefixSummary summary;
+};
+
+template <class Variant>
+using ContextCacheOwnerImport =
+    std::variant<ImportedPrivateContextCacheOwner<Variant>,
+                 ImportedSharedContextCacheOwner<Variant>>;
+
+using ContextCacheOwnerSummary = std::variant<ContinuationSummary, SharedPrefixSummary>;
+
+// Move-only tokens for Program-owned, whole-archive transactions. Their payload and object-link
+// maps stay opaque to Engine/ResourceManager; dropping an import token rolls its unpublished
+// physical staging back through Program.
+class ContextCacheExportSession {
+public:
+    ContextCacheExportSession() noexcept = default;
+    ContextCacheExportSession(ContextCacheExportSession&&) noexcept = default;
+    ContextCacheExportSession& operator=(ContextCacheExportSession&&) noexcept = default;
+    ContextCacheExportSession(const ContextCacheExportSession&) = delete;
+    ContextCacheExportSession& operator=(const ContextCacheExportSession&) = delete;
+
+private:
+    explicit ContextCacheExportSession(std::shared_ptr<void> state) noexcept
+        : state_(std::move(state)) {}
+
+    std::shared_ptr<void> state_;
+
+    template <class V>
+    friend class Program;
+};
+
+class ContextCacheImportSession {
+public:
+    ContextCacheImportSession() noexcept = default;
+    ContextCacheImportSession(ContextCacheImportSession&&) noexcept = default;
+    ContextCacheImportSession& operator=(ContextCacheImportSession&&) noexcept = default;
+    ContextCacheImportSession(const ContextCacheImportSession&) = delete;
+    ContextCacheImportSession& operator=(const ContextCacheImportSession&) = delete;
+
+private:
+    explicit ContextCacheImportSession(std::shared_ptr<void> state) noexcept
+        : state_(std::move(state)) {}
+
+    std::shared_ptr<void> state_;
+
+    template <class V>
+    friend class Program;
+};
+
+template <class Variant>
 struct AbortResult {
     runtime::ConsumeStatus status = runtime::ConsumeStatus::InvariantMismatch;
     GenerationTimings timings;
@@ -924,7 +983,27 @@ public:
            runtime::ExecutionTiming* failed_timing = nullptr);
     [[nodiscard]] DiscardResult<Variant> abort_pending(PendingBatch<Variant>&& pending) noexcept;
     [[nodiscard]] FinishResult<Variant> finish(SequenceHandle<Variant> sequence) noexcept;
+    // Terminalizes the last committed state after client cancellation. No pending model unit or
+    // resource transaction may exist; the current committed State/KV frontier is frozen exactly.
+    [[nodiscard]] FinishResult<Variant>
+    finish_cancelled(SequenceHandle<Variant> sequence) noexcept;
     [[nodiscard]] AbortResult<Variant> abort(SequenceHandle<Variant> sequence) noexcept;
+    [[nodiscard]] ContextCacheExportSession begin_context_cache_export();
+    void write_context_cache_owner(ContextCacheExportSession& session,
+                                   const ContinuationHandle<Variant>& owner,
+                                   ContextCacheWriter& writer) const;
+    void write_context_cache_owner(ContextCacheExportSession& session,
+                                   const SharedPrefixHandle<Variant>& owner,
+                                   ContextCacheWriter& writer) const;
+    void end_context_cache_export(ContextCacheExportSession&& session) noexcept;
+    [[nodiscard]] ContextCacheImportSession
+    begin_context_cache_import(std::size_t expected_owner_count);
+    [[nodiscard]] ContextCacheOwnerSummary
+    read_context_cache_owner(ContextCacheImportSession& session, ContextCacheReader& reader,
+                             ContextCacheOwnerKind expected);
+    [[nodiscard]] std::vector<ContextCacheOwnerImport<Variant>>
+    commit_context_cache_import(ContextCacheImportSession&& session);
+    [[nodiscard]] bool abort_context_cache_import(ContextCacheImportSession&& session) noexcept;
     [[nodiscard]] ReleaseResult<Variant>
     release_continuation(ContinuationHandle<Variant>&& continuation) noexcept;
     [[nodiscard]] ReleaseResult<Variant>

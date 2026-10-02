@@ -4,6 +4,7 @@
 
 #include "core/device.h"
 #include "core/nvtx.h"
+#include "ninfer/context_cache.h"
 #include "ninfer/types.h"
 #include "runtime/contract/types.h"
 #include "runtime/engine/request_record.h"
@@ -21,6 +22,7 @@
 #include <deque>
 #include <exception>
 #include <future>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -185,9 +187,9 @@ public:
                 throw RequestError(RequestErrorKind::Unavailable,
                                    "inference engine is unavailable");
             }
-            if (context_cache_clear_pending_) {
+            if (context_cache_operation_pending_) {
                 throw RequestError(RequestErrorKind::Unavailable,
-                                   "context cache clear is in progress");
+                                   "context cache operation is in progress");
             }
             if (outstanding_ >= max_outstanding_) {
                 throw RequestError(RequestErrorKind::Overloaded, "inference request queue is full");
@@ -267,24 +269,38 @@ public:
     }
 
     void clear_context_cache() {
-        auto completion = std::make_shared<std::promise<void>>();
-        std::future<void> completed = completion->get_future();
-        {
-            std::lock_guard lock(queue_mutex_);
-            if (stopping_ || failed_) {
-                throw RequestError(RequestErrorKind::Unavailable,
-                                   "inference engine is unavailable");
-            }
-            if (!pending_.empty() || submissions_in_progress_ != 0 ||
-                nonterminal_requests_ != 0 || context_cache_clear_pending_) {
-                throw std::logic_error(
-                    "context cache can only be cleared while the Engine is idle");
-            }
-            context_cache_clear_pending_ = true;
-            clear_context_cache_completion_ = std::move(completion);
-        }
-        queue_cv_.notify_one();
-        completed.get();
+        (void)run_idle_context_cache_command(
+            [this](bool& fail_engine_on_error) {
+                bool release_started = false;
+                try {
+                    resources_.clear_inactive_context_cache(*instance_.program,
+                                                            release_started);
+                } catch (...) {
+                    fail_engine_on_error = release_started;
+                    throw;
+                }
+                return ContextCacheSnapshotStats{};
+            },
+            true, true);
+    }
+
+    [[nodiscard]] ContextCacheSnapshotStats save_context_cache(ContextCacheWriter& writer) {
+        return run_idle_context_cache_command(
+            [this, &writer](bool& fail_engine_on_error) {
+                return resources_.save_context_cache(*instance_.program, writer,
+                                                     fail_engine_on_error);
+            },
+            false, false);
+    }
+
+    [[nodiscard]] ContextCacheSnapshotStats load_context_cache(ContextCacheReader& reader) {
+        return run_idle_context_cache_command(
+            [this, &reader](bool& fail_engine_on_error) {
+                return resources_.load_context_cache(*instance_.program, reader,
+                                                     next_publication_order_,
+                                                     fail_engine_on_error);
+            },
+            true, false);
     }
 
     [[nodiscard]] bool is_available() const {
@@ -300,6 +316,42 @@ public:
     }
 
 private:
+    using ContextCacheOperation =
+        std::function<ContextCacheSnapshotStats(bool& fail_engine_on_error)>;
+
+    struct ContextCacheCommand {
+        ContextCacheOperation operation;
+        std::promise<ContextCacheSnapshotStats> completion;
+        bool fail_engine_on_success_error = false;
+    };
+
+    [[nodiscard]] ContextCacheSnapshotStats
+    run_idle_context_cache_command(ContextCacheOperation operation,
+                                   bool fail_engine_on_success_error,
+                                   bool availability_blocking) {
+        auto command = std::make_shared<ContextCacheCommand>();
+        command->operation = std::move(operation);
+        command->fail_engine_on_success_error = fail_engine_on_success_error;
+        std::future<ContextCacheSnapshotStats> completed = command->completion.get_future();
+        {
+            std::lock_guard lock(queue_mutex_);
+            if (stopping_ || failed_) {
+                throw RequestError(RequestErrorKind::Unavailable,
+                                   "inference engine is unavailable");
+            }
+            if (!pending_.empty() || submissions_in_progress_ != 0 ||
+                nonterminal_requests_ != 0 || context_cache_operation_pending_) {
+                throw std::logic_error(
+                    "context cache operation requires an idle Generation Engine");
+            }
+            context_cache_operation_pending_ = true;
+            context_cache_clear_pending_     = availability_blocking;
+            context_cache_command_          = std::move(command);
+        }
+        queue_cv_.notify_one();
+        return completed.get();
+    }
+
     void release_submission_reservation() noexcept {
         std::lock_guard lock(queue_mutex_);
         release_submission_reservation_locked();
@@ -311,14 +363,17 @@ private:
         if (nonterminal_requests_ != 0) { --nonterminal_requests_; }
     }
 
-    void mark_nonterminal_completed() noexcept {
+    // Called with request->mutex held. Completion becomes visible only after the queue-side
+    // nonterminal count is decremented, so an awakened waiter can immediately request an idle
+    // context-cache operation. No Engine path holds queue_mutex_ while acquiring request->mutex.
+    void mark_nonterminal_completed_locked() noexcept {
         std::lock_guard lock(queue_mutex_);
         if (nonterminal_requests_ != 0) { --nonterminal_requests_; }
     }
 
     [[nodiscard]] bool worker_quiescent_locked() const noexcept {
         if (!pending_.empty() || submissions_in_progress_ != 0 || nonterminal_requests_ != 0 ||
-            context_cache_clear_pending_ || materializing_.has_value()) {
+            context_cache_operation_pending_ || materializing_.has_value()) {
             return false;
         }
         for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
@@ -876,10 +931,10 @@ private:
             std::lock_guard lock(request->mutex);
             if (request->response_done) { return; }
             request->error         = std::move(error);
+            mark_nonterminal_completed_locked();
             request->response_done = true;
         }
         if (mark_completed(request)) { release_reserved_capacity(); }
-        mark_nonterminal_completed();
         request->cv.notify_one();
     }
 
@@ -944,10 +999,10 @@ private:
             std::lock_guard lock(request->mutex);
             if (request->response_done) { return; }
             request->result        = std::move(result);
+            mark_nonterminal_completed_locked();
             request->response_done = true;
         }
         if (mark_completed(request)) { release_reserved_capacity(); }
-        mark_nonterminal_completed();
         request->cv.notify_one();
     }
 
@@ -1043,9 +1098,10 @@ private:
                 throw std::logic_error("active cancellation has no sequence binding");
             }
             (void)request->output.preview_terminal(FinishReason::Cancelled);
-            auto aborted = resources_.abort(*instance_.program, *request->lane, *request->sequence);
-            request->generation_timings = aborted.timings;
-            request->speculative_stats  = std::move(aborted.speculative);
+            auto finished =
+                resources_.finish_cancelled(*instance_.program, *request->lane, *request->sequence);
+            request->generation_timings = finished.timings;
+            request->speculative_stats  = std::move(finished.speculative);
             if (scheduler_.prefill_lane() == lane) { scheduler_.clear_prefill_lane(lane); }
             append_output(request, request->output.commit_preview());
             finish_engine_phase(boundary, EngineHostPhase::Boundary);
@@ -1240,15 +1296,18 @@ private:
             throw std::logic_error("Runtime commit result is not row aligned");
         }
         for (std::size_t row = 0; row < row_count; ++row) {
-            const CommitDisposition expected = cancelled[row] ? CommitDisposition::CancelledReleased
-                                               : decisions[row].terminal
+            const CommitDisposition actual = committed.rows[row].disposition;
+            const CommitDisposition expected = decisions[row].terminal
                                                    ? CommitDisposition::Finishable
                                                    : CommitDisposition::Active;
-            if (committed.rows[row].disposition != expected) {
+            const bool valid_cancel_disposition =
+                !cancelled[row] || actual == CommitDisposition::CancelledFinishable ||
+                actual == CommitDisposition::CancelledReleased;
+            if (!valid_cancel_disposition || (!cancelled[row] && actual != expected)) {
                 throw std::logic_error("Runtime commit row disposition is invalid");
             }
             if (committed.captures[row].has_value() &&
-                (decode_round || expected != CommitDisposition::Active)) {
+                (decode_round || actual != CommitDisposition::Active)) {
                 throw std::logic_error("Runtime exposed a capture outside a committed Begin row");
             }
         }
@@ -1289,10 +1348,16 @@ private:
                 append_output(request, std::move(published), std::move(timing));
                 if (decisions[row].terminal) {
                     if (cancelled[row]) {
-                        terminal_requests[terminal_count] = request;
-                        terminal_lanes[terminal_count]    = lane;
-                        terminal_reasons[terminal_count]  = finish_reasons[row];
-                        ++terminal_count;
+                        if (committed.rows[row].disposition ==
+                            CommitDisposition::CancelledFinishable) {
+                            request->model_state     = EngineRequestState::ModelFinished;
+                            request->terminal_reason = finish_reasons[row];
+                        } else {
+                            terminal_requests[terminal_count] = request;
+                            terminal_lanes[terminal_count]    = lane;
+                            terminal_reasons[terminal_count]  = finish_reasons[row];
+                            ++terminal_count;
+                        }
                     } else {
                         request->model_state     = EngineRequestState::ModelFinished;
                         request->terminal_reason = finish_reasons[row];
@@ -1987,24 +2052,24 @@ private:
     void worker_loop() noexcept {
         bool previous_unit_was_decode = false;
         for (;;) {
-            std::shared_ptr<std::promise<void>> clear_cache_completion;
-            std::shared_ptr<std::promise<void>> abandoned_clear_completion;
+            std::shared_ptr<ContextCacheCommand> context_cache_command;
+            std::shared_ptr<ContextCacheCommand> abandoned_context_cache_command;
             bool shutdown = false;
             {
                 std::unique_lock lock(queue_mutex_);
                 if (!stopping_ && worker_quiescent_locked()) {
                     queue_cv_.wait(lock, [&] {
                         return stopping_ || !pending_.empty() ||
-                               clear_context_cache_completion_ != nullptr;
+                               context_cache_command_ != nullptr;
                     });
                 }
                 if (stopping_) {
-                    abandoned_clear_completion =
-                        std::move(clear_context_cache_completion_);
+                    abandoned_context_cache_command = std::move(context_cache_command_);
+                    context_cache_operation_pending_ = false;
                     context_cache_clear_pending_ = false;
                     shutdown = true;
                 } else {
-                    clear_cache_completion = std::move(clear_context_cache_completion_);
+                    context_cache_command = std::move(context_cache_command_);
                 }
             }
 
@@ -2015,51 +2080,57 @@ private:
                     std::scoped_lock execution_lock(execution_mutex_);
                     fail_all_locked(error);
                 }
-                if (abandoned_clear_completion != nullptr) {
+                if (abandoned_context_cache_command != nullptr) {
                     try {
-                        abandoned_clear_completion->set_exception(error);
+                        abandoned_context_cache_command->completion.set_exception(error);
                     } catch (...) {}
                 }
                 return;
             }
 
             std::unique_lock execution_lock(execution_mutex_);
-            if (clear_cache_completion != nullptr) {
-                std::exception_ptr clear_error;
-                bool release_started = false;
+            if (context_cache_command != nullptr) {
+                std::exception_ptr operation_error;
+                bool fail_engine_on_error = false;
+                bool operation_succeeded = false;
+                ContextCacheSnapshotStats stats;
                 try {
                     {
                         std::lock_guard lock(queue_mutex_);
                         if (!pending_.empty() || submissions_in_progress_ != 0 ||
                             nonterminal_requests_ != 0) {
                             throw std::logic_error(
-                                "context cache clear reached the worker while the Engine was busy");
+                                "context cache command reached the worker while the Engine was busy");
                         }
                     }
-                    resources_.clear_inactive_context_cache(*instance_.program,
-                                                            release_started);
+                    stats = context_cache_command->operation(fail_engine_on_error);
+                    operation_succeeded = true;
                 } catch (...) {
-                    clear_error = std::current_exception();
-                    if (release_started) { fail_all_locked(clear_error); }
+                    operation_error = std::current_exception();
+                    if (fail_engine_on_error) { fail_all_locked(operation_error); }
                 }
-                if (clear_error == nullptr) {
+                if (operation_succeeded) {
                     try {
                         publish_runtime_stats();
                     } catch (...) {
-                        clear_error = std::current_exception();
+                        operation_error = std::current_exception();
+                        if (context_cache_command->fail_engine_on_success_error) {
+                            fail_all_locked(operation_error);
+                        }
                     }
                 }
                 execution_lock.unlock();
                 {
                     std::lock_guard lock(queue_mutex_);
+                    context_cache_operation_pending_ = false;
                     context_cache_clear_pending_ = false;
                 }
                 queue_cv_.notify_all();
                 try {
-                    if (clear_error != nullptr) {
-                        clear_cache_completion->set_exception(clear_error);
+                    if (operation_error != nullptr) {
+                        context_cache_command->completion.set_exception(operation_error);
                     } else {
-                        clear_cache_completion->set_value();
+                        context_cache_command->completion.set_value(stats);
                     }
                 } catch (...) {}
                 continue;
@@ -2164,7 +2235,7 @@ private:
     std::size_t submissions_in_progress_  = 0;
     std::uint64_t next_request_id_        = 1;
     std::uint64_t next_publication_order_ = 1;
-    std::shared_ptr<std::promise<void>> clear_context_cache_completion_;
+    std::shared_ptr<ContextCacheCommand> context_cache_command_;
     std::array<std::shared_ptr<Request>, kMaximumConcurrency> slots_{};
     std::optional<MaterializingRequest> materializing_;
     Scheduling scheduler_;
@@ -2175,7 +2246,8 @@ private:
     std::size_t current_decode_lane_count_ = 0;
     RuntimeStats cumulative_stats_;
     RuntimeStats published_stats_;
-    bool context_cache_clear_pending_ = false;
+    bool context_cache_operation_pending_ = false;
+    bool context_cache_clear_pending_     = false;
     bool stopping_                    = false;
     bool failed_                      = false;
     std::thread worker_;

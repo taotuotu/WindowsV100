@@ -766,3 +766,20 @@ Exact model state 和 backend mathematics 见
 [Qwen3.6-35B-A3B model](qwen3.6-35b-a3b-model.md)；persistent KV codec 和 causal consumer
 numerical contract 由上表中的 growing-cache Ops 定义。路径用于定位当前实现，不把文件或类名本身提升为
 外部接口。
+
+---
+
+## 14. Durable checkpoint representation
+
+Windows session persistence serializes the logical Engine/Program checkpoint catalog through the Engine's
+streaming context-cache API. A serialized KV page is a copy of typed logical page contents and coverage,
+not a persistent physical Device page ID or allocator lease. Import reconstructs the logical address spaces,
+owner references, shared aliases, Main/backend KV coverage, fixed StateImages, and exact target frontiers
+inside the Engine's already-sized pools. It does not enlarge GPU pools or allocate additional GPU capacity.
+
+The archive includes both private continuation and shared stable-prefix ownership so sharing and fork
+frontiers survive switching sessions. A page or shared prefix alone is not a resumable session: the
+catalog also needs a valid private session binding and full continuation state. The serving disk store
+keeps two complete generations and only publishes a new generation after Engine serialization succeeds;
+checksum/metadata validation happens before Engine import. It stays opaque to page IDs and Program records,
+which remain owned and validated by their current Engine/target components.

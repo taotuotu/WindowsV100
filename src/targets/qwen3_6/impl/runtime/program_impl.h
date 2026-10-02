@@ -1,5 +1,6 @@
 #include "targets/qwen3_6/impl/runtime/instance.h"
 #include "targets/qwen3_6/impl/runtime/program.h"
+#include "targets/qwen3_6/impl/runtime/context_cache_snapshot_impl.h"
 #include "targets/qwen3_6/impl/runtime/rebuild_work.h"
 
 #include "core/nvtx.h"
@@ -1487,7 +1488,8 @@ std::optional<qwen3_6::detail::PressureDecision> ProgramImplCore::inspect_shared
         (deficit.device.state_slots != 0 || deficit.host.state_slots != 0) &&
         state_store->valid(shared.state) &&
         state_store->role(shared.state) == StateImageRole::CheckpointImmutable &&
-        state_store->source_pins(shared.state) == 0) {
+        state_store->source_pins(shared.state) == 0 &&
+        !has_primary_state_owner(shared.state)) {
         const StateReplicaResidency residency = state_store->residency(shared.state);
         const bool protected_state =
             protection != nullptr && protection->state && *protection->state == shared.state;
@@ -6791,7 +6793,8 @@ ProgramImplCore::owner_exclusive_resources(const SharedPrefixState& shared) cons
             throw std::logic_error("shared prefix StateImage has no checkpoint reference");
         }
         const StateReplicaResidency residency = state_store->residency(shared.state);
-        if (state_store->checkpoint_references(shared.state) == 1) {
+        if (state_store->checkpoint_references(shared.state) == 1 &&
+            !has_primary_state_owner(shared.state)) {
             if (residency == StateReplicaResidency::DeviceOnly ||
                 residency == StateReplicaResidency::Both) {
                 ++out.device.state_slots;
@@ -9159,10 +9162,16 @@ CommitResult ProgramImplCore::commit(PendingBatch&& pending,
         bool released_resource = false;
         for (std::size_t row = 0; row < row_count; ++row) {
             if (decisions[row].cancelled) {
-                invalidate_lane(lanes[row]);
-                released_resource = true;
+                const bool finishable =
+                    requests[lanes[row]].lifecycle == Lifecycle::Finishable;
+                if (!finishable) {
+                    invalidate_lane(lanes[row]);
+                    released_resource = true;
+                }
                 out.rows[row]     = CommitRowResult{
-                        .disposition = runtime::CommitDisposition::CancelledReleased,
+                        .disposition = finishable
+                                           ? runtime::CommitDisposition::CancelledFinishable
+                                           : runtime::CommitDisposition::CancelledReleased,
                         .timings     = timings[row],
                         .speculative = std::move(speculative[row]),
                 };
@@ -9316,6 +9325,53 @@ FinishResult ProgramImplCore::finish(SequenceHandle sequence) noexcept {
     return out;
 }
 
+FinishResult ProgramImplCore::finish_cancelled(SequenceHandle sequence) noexcept {
+    FinishResult out;
+    if (has_context_transaction() || pending_transaction_ || !valid_sequence(sequence)) {
+        return out;
+    }
+    const std::uint32_t lane = ContractAccess::lane(sequence).value;
+    RequestControl& request  = requests[lane];
+    SequenceState& state     = active_sequence(lane);
+    try {
+        if ((request.lifecycle != Lifecycle::Active &&
+             request.lifecycle != Lifecycle::Finishable) ||
+            !state.tail_hidden_valid || !state.kv ||
+            (!state.endpoint_valid &&
+             (!state.state.read.valid() || !state.state.write.valid())) ||
+            state.ledger_frontier != state.execution_frontier + 1U ||
+            state.ledger.size() != state.ledger_frontier ||
+            state.prefix_identity.size() != state.ledger_frontier ||
+            state.prefix_digests.size() != state.ledger_frontier ||
+            state.text_kv_valid != state.execution_frontier ||
+            text_kv_addresses->committed_frontier(state.kv->text) != state.execution_frontier ||
+            (state.kv->backend &&
+             (!backend_kv_addresses ||
+              backend_kv_addresses->committed_frontier(*state.kv->backend) !=
+                  backend_kv_valid(state))) ||
+            (speculative_backend == SpeculativeBackend::Mtp &&
+             (!state.kv->backend || !backend_kv_addresses ||
+              state.mtp_kv_valid != state.execution_frontier ||
+              backend_kv_addresses->committed_frontier(*state.kv->backend) !=
+                  state.mtp_kv_valid)) ||
+            (speculative_backend == SpeculativeBackend::None && state.kv->backend)) {
+            return out;
+        }
+    } catch (...) { return out; }
+
+    // Engine observes cancellation only at a worker boundary, after the current decode unit has
+    // committed. Consequently the ledger can contain one sampled lookahead token beyond the KV
+    // frontier; it must remain provenance in the checkpoint while its GDN/KV effects are still
+    // absent. A PendingBatch is rejected above, so provisional speculative proposals never enter
+    // this checkpoint.
+    // A stable cancellation checkpoint is the last committed endpoint. Draft tokens belong to
+    // the next speculative proposal round and are discarded before RM captures the summary.
+    state.mtp_draft_count = 0;
+    request.prefill.reset();
+    request.lifecycle = Lifecycle::Finishable;
+    return finish(sequence);
+}
+
 AbortResult ProgramImplCore::abort(SequenceHandle sequence) noexcept {
     AbortResult out;
     if (has_context_transaction() || pending_transaction_ || !valid_sequence(sequence)) {
@@ -9353,6 +9409,23 @@ ReleaseResult ProgramImplCore::release_continuation(ContinuationHandle&& continu
     return out;
 }
 
+bool ProgramImplCore::has_primary_state_owner(StateImageHandle state) const noexcept {
+    if (!state_store || !state_store->valid(state)) { return false; }
+    for (std::uint32_t index = 0; index < continuation_capacity; ++index) {
+        if (continuation_slots[index].role == ContinuationSlotRole::Free ||
+            continuation_slots[index].role == ContinuationSlotRole::ReservedMaterialization) {
+            continue;
+        }
+        const SequenceState& sequence = continuation_states[index];
+        if (sequence.state.read == state && sequence.state.write == state &&
+            !sequence.state.fork_pending &&
+            sequence.state.read_ownership == StateReadOwnership::Primary) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool ProgramImplCore::can_release_shared_prefix_state(std::uint32_t index,
                                                       SharedPrefixSlotRole expected_role) const {
     if (index >= shared_prefix_capacity || !state_store || !text_kv_addresses ||
@@ -9369,6 +9442,7 @@ bool ProgramImplCore::can_release_shared_prefix_state(std::uint32_t index,
     const std::uint32_t state_references = state_store->checkpoint_references(shared.state);
     return state_references != 0 &&
            (state_references != 1 ||
+            has_primary_state_owner(shared.state) ||
             state_store->can_release_after_checkpoint_references(shared.state, 1));
 }
 
@@ -9381,12 +9455,16 @@ ProgramImplCore::release_shared_prefix_state_strict(std::uint32_t index,
         SharedPrefixSlot& slot                  = shared_prefix_slots[index];
         const detail::PhysicalResources removed = owner_exclusive_resources(shared);
         const bool last_state_reference = state_store->checkpoint_references(shared.state) == 1;
+        const bool primary_state_owner = has_primary_state_owner(shared.state);
         if (shared.kv->backend && !backend_kv_addresses->release(*shared.kv->backend)) {
             std::terminate();
         }
         if (!text_kv_addresses->release(shared.kv->text)) { std::terminate(); }
         state_store->release_checkpoint_reference(shared.state);
-        if (last_state_reference && !state_store->release(shared.state)) { std::terminate(); }
+        if (last_state_reference && !primary_state_owner &&
+            !state_store->release(shared.state)) {
+            std::terminate();
+        }
 
         shared    = SharedPrefixState{};
         slot.role = SharedPrefixSlotRole::Free;
@@ -10260,6 +10338,53 @@ runtime::ExecutionTiming ProgramImplCore::resolve_pending_raw(
             SequenceState& sequence = active_sequence(lanes[row]);
             RequestControl& request = requests[lanes[row]];
             if (cancelled[row]) {
+                if (speculative_backend == SpeculativeBackend::Mtp) {
+                    const PendingCandidate pending = request.pending;
+                    if (request.pending.kind != PendingKind::Speculative ||
+                        request.lifecycle != Lifecycle::Pending || !sequence.kv ||
+                        !sequence.kv->backend || sequence.execution_frontier != pending.base_E ||
+                        sequence.ledger_frontier != pending.base_S ||
+                        sequence.ledger.size() != pending.base_S ||
+                        sequence.prefix_identity.size() != pending.base_S ||
+                        sequence.prefix_digests.size() != pending.base_S ||
+                        sequence.text_kv_valid != pending.base_E ||
+                        sequence.mtp_kv_valid != pending.base_E ||
+                        text_kv_addresses->committed_frontier(sequence.kv->text) != pending.base_E ||
+                        backend_kv_addresses->committed_frontier(*sequence.kv->backend) !=
+                            pending.base_E) {
+                        throw std::logic_error(
+                            "cancelled MTP verification no longer matches its committed base");
+                    }
+                    // ReplaySSM with zero accepted columns leaves the base untouched. If this
+                    // sequence still has an unsettled COW Fork, copy the exact base StateImage
+                    // into its private destination before settling it; no provisional proposal
+                    // token or recurrent state enters the cancelled continuation.
+                    if (sequence.state.fork_pending) {
+                        const StateImageSelectors selectors = state_selectors(sequence);
+                        timing.begin_wait();
+                        try {
+                            state_images->copy_slot(selectors.source, selectors.destination,
+                                                    device.stream);
+                            device.synchronize();
+                        } catch (...) {
+                            try {
+                                device.synchronize();
+                            } catch (...) {}
+                            timing.end_wait();
+                            throw;
+                        }
+                        timing.end_wait();
+                        settle_state_fork(sequence);
+                    }
+                    commit_sequence_kv(sequence, pending.base_E, pending.base_E);
+                    trim_sequence_kv(sequence, pending.base_E, pending.base_E);
+                    sequence.mtp_draft_count = 0;
+                    request.prefill.reset();
+                    request.lifecycle = Lifecycle::Finishable;
+                    request.pending = {};
+                    request.timings.decode_seconds += tail_seconds;
+                    continue;
+                }
                 if (!clear_lane_strict(sequence, request)) {
                     throw std::logic_error("cancelled speculative lane is not strictly releasable");
                 }
@@ -12522,5 +12647,7 @@ void ProgramImplCore::reset_memory_peaks() noexcept {
                      workspace_plan.vision->handoff_offset_bytes + active_handoff_bytes);
     }
 }
+
+#include "targets/qwen3_6/impl/runtime/context_cache_snapshot_methods.h"
 
 } // namespace ninfer::targets::qwen3_6::detail::NINFER_QWEN36_RUNTIME_NS

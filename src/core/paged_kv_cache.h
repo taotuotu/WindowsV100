@@ -237,6 +237,13 @@ public:
                         std::span<const DeviceKVPageHandle> destination,
                         cudaStream_t stream = nullptr) const;
 
+    // Transfers one page using the canonical HostKVPageLayout record for this pool. The record
+    // includes deterministic zero padding and every typed code/scale plane.
+    void copy_page_to_host(DeviceKVPageHandle source, std::span<std::byte> destination,
+                           cudaStream_t stream = nullptr) const;
+    void copy_page_from_host(std::span<const std::byte> source, DeviceKVPageHandle destination,
+                             cudaStream_t stream = nullptr) const;
+
 private:
     friend class DeviceKVPageLease;
     friend class DeviceKVPageReservation;

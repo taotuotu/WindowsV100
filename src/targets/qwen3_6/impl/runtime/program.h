@@ -609,7 +609,24 @@ public:
                                       runtime::ExecutionTiming* failed_timing);
     [[nodiscard]] DiscardResult abort_pending(PendingBatch&& pending) noexcept;
     [[nodiscard]] FinishResult finish(SequenceHandle sequence) noexcept;
+    [[nodiscard]] FinishResult finish_cancelled(SequenceHandle sequence) noexcept;
     [[nodiscard]] AbortResult abort(SequenceHandle sequence) noexcept;
+    [[nodiscard]] std::shared_ptr<void> begin_context_cache_export();
+    void write_context_cache_owner(const std::shared_ptr<void>& session,
+                                   const ContinuationHandle& owner,
+                                   ContextCacheWriter& writer) const;
+    void write_context_cache_owner(const std::shared_ptr<void>& session,
+                                   const SharedPrefixHandle& owner,
+                                   ContextCacheWriter& writer) const;
+    void end_context_cache_export(std::shared_ptr<void>&& session) noexcept;
+    [[nodiscard]] std::shared_ptr<void>
+    begin_context_cache_import(std::size_t expected_owner_count);
+    [[nodiscard]] qwen3_6::ContextCacheOwnerSummary
+    read_context_cache_owner(const std::shared_ptr<void>& session, ContextCacheReader& reader,
+                             ContextCacheOwnerKind expected);
+    [[nodiscard]] std::vector<qwen3_6::ContextCacheOwnerImport<Variant>>
+    commit_context_cache_import(std::shared_ptr<void>& session);
+    [[nodiscard]] bool abort_context_cache_import(std::shared_ptr<void>&& session) noexcept;
     [[nodiscard]] ReleaseResult release_continuation(ContinuationHandle&& continuation) noexcept;
     [[nodiscard]] ReleaseResult release_shared_prefix(SharedPrefixHandle&& shared) noexcept;
     void fail_all_cleanup() noexcept;
@@ -1165,6 +1182,7 @@ private:
                                                             StateImageHandle state) const noexcept;
     [[nodiscard]] bool state_exclusive_to_sequence(const SequenceState& sequence,
                                                    StateImageHandle state) const noexcept;
+    [[nodiscard]] bool has_primary_state_owner(StateImageHandle state) const noexcept;
     [[nodiscard]] bool compose_pressure_candidate(
         ResourceCandidateState& candidate,
         std::span<const ContinuationHandle* const> pressure_owners,

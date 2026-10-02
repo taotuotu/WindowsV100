@@ -543,6 +543,8 @@ if(NINFER_BUILD_SERVE)
   target_include_directories(ninfer_serve PRIVATE
     ${PROJECT_SOURCE_DIR}/third_party/cpp-httplib)
   if(WIN32 AND NINFER_BUILD_WINDOWS_SERVE)
+    target_sources(ninfer_serve PRIVATE serve/session_cache.cpp)
+    target_link_libraries(ninfer_serve PRIVATE bcrypt)
     target_include_directories(ninfer_serve PRIVATE
       "${CMAKE_CURRENT_BINARY_DIR}/generated")
   endif()

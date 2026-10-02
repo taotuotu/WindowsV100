@@ -114,6 +114,18 @@ Program 资源，再清空 session/prefix 索引；active lane 不会被回滚�
 若 Program 拒绝 release capability，Engine 会在已开始物理释放时执行统一 failure cleanup 并标记不可用，
 不会让逻辑目录与剩余物理 cache 半清状态继续服务。
 
+Engine 还提供 idle-only 的流式 `save_context_cache(ContextCacheWriter&)` 与
+`load_context_cache(ContextCacheReader&)`。两者只能在没有活动请求时调用；Engine/ResourceManager
+导出完整 private/shared checkpoint catalog 与 session binding，并由 Engine worker 协调 target Program
+逐 owner 序列化完整 KV、recurrent、hidden state 和精确 frontier。Load 在 import 完成后一次发布；任意
+record校验或导入失败都会撤销未发布的导入，owner回滚失败则标记Engine不可用并传播所有权错误。
+调用者可用idle-only clear预先清空inactive目录，但不能绕过Engine直接操作CUDA指针或Program文件格式。
+
+Windows serving 的 `SessionCacheStore` 位于 `src/serve/session_cache.*`，只负责对 opaque Engine 流做
+checksum、artifact/runtime identity 验证、会话文件命名、bounded disk budget 与原子磁盘提交。它不能
+解释Program record，也不拥有CUDA/KV/StateImage内存。GenerationService在请求终结后调用save；切换
+session时先clear Engine inactive catalog，再惰性load目标会话。清理UI控制同时清Engine与磁盘目录。
+
 ### 2.4 Program
 
 Program 是 exact target package 的唯一物理执行入口，拥有：

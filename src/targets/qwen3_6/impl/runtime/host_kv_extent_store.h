@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <exception>
 #include <limits>
+#include <new>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -80,12 +81,25 @@ public:
 
     [[nodiscard]] std::uint32_t occupied() const noexcept { return capacity() - free_count_; }
 
+    [[nodiscard]] bool can_publish_imported_pages(std::size_t count) const noexcept {
+        return count <= free_count_ && count <= free_membership_count_;
+    }
+
     [[nodiscard]] const HostKVPageLayout& page_layout(const LogicalKVPageStore& pages) const {
         const HostKVPageLayout* layout = arena_->layout_for(pages.physical_pool().geometry());
         if (layout == nullptr) {
             throw std::invalid_argument("Host KV page store has no arena layout");
         }
         return *layout;
+    }
+
+    // Reserve one typed Host page for an unpublished archive import. The allocation remains
+    // owned by the import transaction until its all-owner publish point.
+    [[nodiscard]] std::optional<HostKVAllocation>
+    allocate_imported_page(const LogicalKVPageStore& pages) noexcept {
+        const HostKVPageLayout* layout = arena_->layout_for(pages.physical_pool().geometry());
+        if (layout == nullptr) { return std::nullopt; }
+        return arena_->allocate(*layout, 1);
     }
 
     [[nodiscard]] std::optional<HostKVExtentReservation>
@@ -236,6 +250,50 @@ public:
     [[nodiscard]] HostKVAllocationConstView view(HostKVExtentCapability capability) const {
         const Extent& extent = require(capability);
         return arena_->view(*extent.allocation);
+    }
+
+    [[nodiscard]] HostKVExtentCapability publish_imported_page(
+        LogicalKVPageStore& pages, LogicalKVPageHandle page, HostKVAllocation&& allocation) {
+        if (!pages.valid(page) || pages.host_resident(page) || !allocation.valid() ||
+            allocation.page_count() != 1 || free_count_ == 0 || free_membership_count_ == 0) {
+            throw std::bad_alloc();
+        }
+        const HostKVAllocationConstView source = arena_->view(allocation);
+        if (source.layout().geometry != pages.physical_pool().geometry()) {
+            throw std::invalid_argument("imported Host KV page has an incompatible geometry");
+        }
+        const std::uint32_t descriptor = free_[--free_count_];
+        Extent& extent = extents_[descriptor];
+        if (extent.state != ExtentState::Free) { std::terminate(); }
+        const std::uint32_t node = take_membership();
+        if (node == kInvalidIndex) { std::terminate(); }
+        extent.state = ExtentState::Published;
+        extent.page_store = &pages;
+        extent.allocation.emplace(std::move(allocation));
+        extent.head = node;
+        extent.tail = node;
+        extent.page_count = 1;
+        Membership& entry = memberships_[node];
+        entry.page = page;
+        entry.epoch = pages.content_epoch(page);
+        entry.coverage = pages.committed_columns(page);
+        entry.extent = descriptor;
+        entry.offset = 0;
+        entry.next = kInvalidIndex;
+        const HostKVExtentCapability capability(this, descriptor, extent.generation);
+        try {
+            pages.attach_host_replica(
+                page, HostKVPageReplica{.extent = capability,
+                                        .page_offset = 0,
+                                        .membership_node = node,
+                                        .content_epoch = entry.epoch,
+                                        .committed_columns = entry.coverage});
+        } catch (...) {
+            // All geometry, page, and descriptor facts were checked before publication; failure
+            // here means the physical ownership invariant can no longer be interpreted.
+            std::terminate();
+        }
+        return capability;
     }
 
     [[nodiscard]] bool release(HostKVExtentCapability capability) noexcept {

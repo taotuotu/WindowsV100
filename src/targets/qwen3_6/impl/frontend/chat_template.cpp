@@ -608,7 +608,8 @@ RenderedChat CompiledChatTemplate::render(const std::vector<ChatMessage>& messag
         }
         reasoning = trim_ascii_whitespace(reasoning);
 
-        const bool keep_thinking = preserve_thinking || (static_cast<long>(i) > last_query_index);
+        const bool keep_thinking = preserve_thinking || (static_cast<long>(i) > last_query_index) ||
+                                   (options.preserve_empty_thinking && reasoning.text.empty());
         if (!preserve_thinking && !rewrite_checkpoint && static_cast<long>(i) > last_query_index) {
             // Closing the current turn may rewrite everything beginning with this assistant
             // segment. Keep the stable history before the opener recoverable; retaining the

@@ -13,6 +13,10 @@ routes. Personal machine settings belong in ignored `.local/`, not product defau
 Windows image input uses native WIC for PNG/JPEG/BMP and the registered artifact's existing
 Vision Encoder. Video remains unsupported by this Windows product. Vision is startup-fixed;
 its weights and unified workspace must fit together with the requested text KV capacity.
+The Windows serving product keeps idle Engine continuation snapshots under the ignored
+`.local/context-cache` directory by default, bounded to 32 GiB and eight sessions. Snapshots
+contain trusted, locally generated Engine state and are bound to the exact artifact and runtime
+configuration; clearing the context cache also removes these disk snapshots. Do not package them.
 Source and release packages must preserve LICENSE, NOTICE and THIRD_PARTY_NOTICES.md; exclude
 weights, runtime request logs and personal configuration. Do not publish upstream benchmark
 rates as measured Windows rates. Existing Engine and ownership contracts still apply.

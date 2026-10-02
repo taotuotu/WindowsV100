@@ -535,8 +535,70 @@ FinishResult<Variant> Program<Variant>::finish(SequenceHandle<Variant> sequence)
 }
 
 template <>
+FinishResult<Variant>
+Program<Variant>::finish_cancelled(SequenceHandle<Variant> sequence) noexcept {
+    return impl_->finish_cancelled(sequence);
+}
+
+template <>
 AbortResult<Variant> Program<Variant>::abort(SequenceHandle<Variant> sequence) noexcept {
     return impl_->abort(sequence);
+}
+
+template <>
+ContextCacheExportSession Program<Variant>::begin_context_cache_export() {
+    return ContextCacheExportSession(impl_->begin_context_cache_export());
+}
+
+template <>
+void Program<Variant>::write_context_cache_owner(
+    ContextCacheExportSession& session, const ContinuationHandle<Variant>& owner,
+    ContextCacheWriter& writer) const {
+    if (!session.state_) { throw std::invalid_argument("context-cache export session is empty"); }
+    impl_->write_context_cache_owner(session.state_, owner, writer);
+}
+
+template <>
+void Program<Variant>::write_context_cache_owner(
+    ContextCacheExportSession& session, const SharedPrefixHandle<Variant>& owner,
+    ContextCacheWriter& writer) const {
+    if (!session.state_) { throw std::invalid_argument("context-cache export session is empty"); }
+    impl_->write_context_cache_owner(session.state_, owner, writer);
+}
+
+template <>
+void Program<Variant>::end_context_cache_export(ContextCacheExportSession&& session) noexcept {
+    if (!session.state_) { return; }
+    impl_->end_context_cache_export(std::move(session.state_));
+}
+
+template <>
+ContextCacheImportSession Program<Variant>::begin_context_cache_import(
+    std::size_t expected_owner_count) {
+    return ContextCacheImportSession(impl_->begin_context_cache_import(expected_owner_count));
+}
+
+template <>
+ContextCacheOwnerSummary Program<Variant>::read_context_cache_owner(
+    ContextCacheImportSession& session, ContextCacheReader& reader,
+    ContextCacheOwnerKind expected) {
+    if (!session.state_) { throw std::invalid_argument("context-cache import session is empty"); }
+    return impl_->read_context_cache_owner(session.state_, reader, expected);
+}
+
+template <>
+std::vector<ContextCacheOwnerImport<Variant>>
+Program<Variant>::commit_context_cache_import(ContextCacheImportSession&& session) {
+    if (!session.state_) { throw std::invalid_argument("context-cache import session is empty"); }
+    auto owners = impl_->commit_context_cache_import(session.state_);
+    session.state_.reset();
+    return owners;
+}
+
+template <>
+bool Program<Variant>::abort_context_cache_import(ContextCacheImportSession&& session) noexcept {
+    if (!session.state_) { return true; }
+    return impl_->abort_context_cache_import(std::move(session.state_));
 }
 
 template <>

@@ -78,6 +78,8 @@ std::string serve_usage_text(const char* argv0) {
            "[--prefill-chunk N] [--log-stats-interval-ms N] "
 #if defined(NINFER_WINDOWS_SERVE)
            "[--device auto|N] "
+           "[--context-disk-cache DIR | --no-context-disk-cache] "
+           "[--context-disk-cache-mib N] [--context-disk-cache-sessions N] "
 #else
            "[--device N] "
 #endif
@@ -112,6 +114,8 @@ std::string serve_usage_text(const char* argv0) {
 #if defined(NINFER_WINDOWS_SERVE)
            "       --vision enables PNG/JPEG/BMP image input and fixed Vision GPU allocations; "
            "video input is unavailable on Windows\n"
+           "       disk context snapshots default to .local/context-cache, 32768 MiB, 8 sessions; "
+           "--no-context-disk-cache disables persistence\n"
 #else
            "       --vision enables media and loads the fixed Vision GPU allocations\n"
 #endif
@@ -124,7 +128,7 @@ std::string serve_usage_text(const char* argv0) {
            "       exclusive-session cache defaults: extra Device StateImages=1, Host StateImages=8, Host KV=0 MiB, "
            "private continuations=2x concurrency, shared prefixes=max(concurrency,4), anchors=1\n"
            "       Windows serves one generation request at a time; a concurrent request receives HTTP 429. "
-           "Switching session clears the previous session's checkpoints.\n"
+           "Switching session clears RAM checkpoints and restores its saved disk snapshot when enabled.\n"
            "       --no-prefix-reuse disables compatible-prefix caching\n"
 #else
            "       --no-prefix-reuse disables compatible-prefix caching (enabled by default)\n"
@@ -238,6 +242,30 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         } else if (arg == "--log-stats-interval-ms") {
             options.log_stats_interval_ms = static_cast<std::uint32_t>(parse_nonnegative_int(
                 require_value("--log-stats-interval-ms"), "log-stats-interval-ms"));
+#if defined(NINFER_WINDOWS_SERVE)
+        } else if (arg == "--context-disk-cache") {
+            const std::string directory = require_value("--context-disk-cache");
+            if (directory.empty()) {
+                throw std::invalid_argument("--context-disk-cache must not be empty");
+            }
+            options.context_disk_cache_directory = std::filesystem::u8path(directory);
+        } else if (arg == "--no-context-disk-cache") {
+            options.context_disk_cache_directory.clear();
+        } else if (arg == "--context-disk-cache-mib") {
+            const auto mib = parse_u64(require_value("--context-disk-cache-mib"),
+                                       "context-disk-cache-mib");
+            if (mib == 0 || mib > std::numeric_limits<std::uint64_t>::max() / (1ULL << 20)) {
+                throw std::invalid_argument("--context-disk-cache-mib is out of range");
+            }
+            options.context_disk_cache_bytes = mib << 20;
+        } else if (arg == "--context-disk-cache-sessions") {
+            const auto count = parse_u64(require_value("--context-disk-cache-sessions"),
+                                         "context-disk-cache-sessions");
+            if (count == 0 || count > 128) {
+                throw std::invalid_argument("--context-disk-cache-sessions must be in [1,128]");
+            }
+            options.context_disk_cache_sessions = static_cast<std::uint32_t>(count);
+#endif
         } else if (arg == "--max-request-mib") {
             const std::uint64_t mib =
                 parse_u64(require_value("--max-request-mib"), "max-request-mib");

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ninfer/types.h"
+#include "ninfer/context_cache.h"
 #include "runtime/contract/types.h"
 #include "runtime/engine/context_cost.h"
 #include "runtime/engine/materialization_planner.h"
@@ -12,6 +13,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <limits>
 #include <optional>
 #include <span>
@@ -82,6 +84,22 @@ public:
     using StartResult                       = typename Package::StartResult;
     using FinishResult                      = typename Package::FinishResult;
     using AbortResult                       = typename Package::AbortResult;
+    using ProgramCacheExportSession =
+        decltype(std::declval<Program&>().begin_context_cache_export());
+    using ProgramCacheImportSession = decltype(std::declval<Program&>().begin_context_cache_import(
+        std::declval<std::size_t>()));
+    using ProgramCacheOwnerSummary = decltype(std::declval<Program&>().read_context_cache_owner(
+        std::declval<ProgramCacheImportSession&>(), std::declval<ContextCacheReader&>(),
+        ContextCacheOwnerKind::PrivateContinuation));
+    using ProgramCacheOwnerImports = decltype(std::declval<Program&>().commit_context_cache_import(
+        std::declval<ProgramCacheImportSession&&>()));
+    using ProgramCacheOwnerImport = typename ProgramCacheOwnerImports::value_type;
+    using ProgramImportedPrivateOwner = std::variant_alternative_t<0, ProgramCacheOwnerImport>;
+    using ProgramImportedSharedOwner  = std::variant_alternative_t<1, ProgramCacheOwnerImport>;
+    using ProgramCacheOwnerSummaryPrivate =
+        std::variant_alternative_t<0, ProgramCacheOwnerSummary>;
+    using ProgramCacheOwnerSummaryShared =
+        std::variant_alternative_t<1, ProgramCacheOwnerSummary>;
     using Planner                           = MaterializationPlanner<Package>;
     using CapturePlanner                    = SharedCapturePlanner<Package>;
 
@@ -267,6 +285,250 @@ public:
         for (std::uint32_t lane = 0; lane < lane_count_; ++lane) {
             active_[lane].shared_sources.reserve(shared_catalog_capacity);
         }
+    }
+
+    [[nodiscard]] ContextCacheSnapshotStats save_context_cache(
+        Program& program, ContextCacheWriter& writer, bool& fail_engine_on_error) const {
+        fail_engine_on_error = false;
+        require_idle_cache_catalog(program);
+        if (!cache_enabled_) {
+            throw ContextCacheUnsupported("context-cache persistence is disabled for this Engine");
+        }
+
+        CountingContextCacheWriter counted(writer);
+        std::uint32_t private_count = 0;
+        std::uint32_t shared_count  = 0;
+        for (const CatalogEntry& entry : catalog_) {
+            if (entry.state == CatalogState::Catalogued) {
+                if (!entry.handle) {
+                    throw std::logic_error("catalogued continuation has no owner handle");
+                }
+                ++private_count;
+            } else if (entry.state != CatalogState::Vacant || entry.handle) {
+                throw std::logic_error("context-cache save found a claimed private owner");
+            }
+        }
+        for (const SharedCatalogEntry& entry : shared_catalog_) {
+            if (entry.state == SharedCatalogState::Catalogued) {
+                if (!entry.handle || entry.transaction_pins != 0) {
+                    throw std::logic_error("catalogued shared prefix is not stable");
+                }
+                ++shared_count;
+            } else if (entry.state != SharedCatalogState::Vacant || entry.handle ||
+                       entry.transaction_pins != 0) {
+                throw std::logic_error("context-cache save found a claimed shared owner");
+            }
+        }
+
+        validate_session_index_consistency();
+        ProgramCacheExportSession export_session = [&] {
+            try {
+                return program.begin_context_cache_export();
+            } catch (const ContextCacheOwnershipError&) {
+                fail_engine_on_error = true;
+                throw;
+            }
+        }();
+        ContextCacheSnapshotStats stats;
+        stats.private_continuations = private_count;
+        stats.shared_prefixes       = shared_count;
+
+        try {
+            counted.write(kContextCacheMagic);
+            write_context_cache_u32(counted, kContextCacheVersion);
+            write_context_cache_u32(counted, private_count);
+            write_context_cache_u32(counted, shared_count);
+
+            // Shared owners are restored first so private owners can rebuild any page aliases they
+            // reference. The Program export session preserves aliases across every owner record.
+            for (std::uint32_t slot = 0; slot < shared_catalog_count_; ++slot) {
+                const SharedCatalogEntry& entry = shared_catalog_[slot];
+                if (entry.state != SharedCatalogState::Catalogued) { continue; }
+                if (!valid_shared_prefix_summary(entry.summary)) {
+                    throw std::logic_error("shared-prefix catalog has an invalid summary");
+                }
+                program.write_context_cache_owner(export_session, *entry.handle, counted);
+                ++stats.checkpoints;
+            }
+            for (std::uint32_t slot = 0; slot < catalog_count_; ++slot) {
+                const CatalogEntry& entry = catalog_[slot];
+                if (entry.state != CatalogState::Catalogued) { continue; }
+                if (!valid_continuation_summary(entry.summary)) {
+                    throw std::logic_error("private continuation catalog has an invalid summary");
+                }
+                const PrivateSessionBinding binding = private_session_binding(slot, entry);
+                write_private_owner_metadata(counted, entry, binding);
+                program.write_context_cache_owner(export_session, *entry.handle, counted);
+                if (binding.indexed) { ++stats.session_continuations; }
+                stats.checkpoints += continuation_checkpoint_count(entry.summary);
+            }
+            program.end_context_cache_export(std::move(export_session));
+        } catch (const ContextCacheOwnershipError&) {
+            fail_engine_on_error = true;
+            program.end_context_cache_export(std::move(export_session));
+            throw;
+        } catch (...) {
+            program.end_context_cache_export(std::move(export_session));
+            throw;
+        }
+        stats.bytes = counted.bytes_written();
+        return stats;
+    }
+
+    [[nodiscard]] ContextCacheSnapshotStats load_context_cache(
+        Program& program, ContextCacheReader& reader, std::uint64_t& next_publication_order,
+        bool& fail_engine_on_error) {
+        fail_engine_on_error = false;
+        require_idle_cache_catalog(program);
+        require_empty_cache_catalog();
+        if (!cache_enabled_) {
+            throw ContextCacheUnsupported("context-cache persistence is disabled for this Engine");
+        }
+
+        const std::uint64_t bytes_before = reader.remaining_bytes();
+        if (bytes_before < kContextCacheHeaderBytes) {
+            throw std::invalid_argument("context-cache archive is shorter than its header");
+        }
+        CountingContextCacheReader counted(reader);
+        std::array<std::byte, kContextCacheMagic.size()> magic{};
+        counted.read_exact(magic);
+        if (magic != kContextCacheMagic) {
+            throw std::invalid_argument("context-cache archive magic is invalid");
+        }
+        if (read_context_cache_u32(counted) != kContextCacheVersion) {
+            throw std::invalid_argument("context-cache archive version is unsupported");
+        }
+        const std::uint32_t private_count = read_context_cache_u32(counted);
+        const std::uint32_t shared_count  = read_context_cache_u32(counted);
+        if (private_count > catalog_count_ || shared_count > shared_catalog_count_) {
+            throw std::invalid_argument("context-cache archive exceeds catalog capacity");
+        }
+
+        const std::size_t total_owner_count =
+            static_cast<std::size_t>(private_count) + static_cast<std::size_t>(shared_count);
+        std::vector<ImportedSharedOwner> imported_shared;
+        std::vector<ImportedPrivateOwner> imported_private;
+        std::vector<ProgramCacheOwnerImport> imported_handles;
+        imported_shared.reserve(shared_count);
+        imported_private.reserve(private_count);
+        imported_handles.reserve(total_owner_count);
+        std::optional<ProgramCacheImportSession> import_session;
+        std::uint64_t max_publication_order = 0;
+        std::uint64_t archive_bytes = 0;
+        bool commit_attempted = false;
+        try {
+            if (total_owner_count != 0) {
+                import_session.emplace(program.begin_context_cache_import(total_owner_count));
+                for (std::uint32_t index = 0; index < shared_count; ++index) {
+                    imported_shared.push_back(
+                        read_shared_owner(program, *import_session, counted));
+                }
+                for (std::uint32_t index = 0; index < private_count; ++index) {
+                    ImportedPrivateOwner imported_owner =
+                        read_private_owner(program, *import_session, counted);
+                    if (imported_owner.session_binding) {
+                        max_publication_order =
+                            std::max(max_publication_order, imported_owner.publication_order);
+                    }
+                    imported_private.push_back(std::move(imported_owner));
+                }
+            }
+            if (counted.remaining_bytes() != 0) {
+                throw std::invalid_argument("context-cache archive has trailing bytes");
+            }
+            const std::uint64_t bytes_after_read = counted.remaining_bytes();
+            if (bytes_before < bytes_after_read ||
+                bytes_before - bytes_after_read != counted.bytes_read()) {
+                throw std::invalid_argument("context-cache reader byte accounting is inconsistent");
+            }
+            archive_bytes = counted.bytes_read();
+            validate_imported_cache_catalog(imported_private, imported_shared);
+            if (max_publication_order == std::numeric_limits<std::uint64_t>::max()) {
+                throw std::invalid_argument("context-cache publication order is exhausted");
+            }
+
+            if (total_owner_count != 0) {
+                commit_attempted = true;
+                imported_handles =
+                    program.commit_context_cache_import(std::move(*import_session));
+                import_session.reset();
+                validate_committed_cache_owners(imported_private, imported_shared,
+                                                imported_handles);
+            }
+        } catch (...) {
+            const std::exception_ptr import_error = std::current_exception();
+            if (import_session) {
+                bool rollback_succeeded = true;
+                if (!commit_attempted) {
+                    rollback_succeeded =
+                        program.abort_context_cache_import(std::move(*import_session));
+                }
+                import_session.reset();
+                if (!rollback_succeeded) {
+                    fail_engine_on_error = true;
+                    throw ContextCacheOwnershipError(
+                        "failed to roll back staged context-cache owners");
+                }
+            }
+            if (!imported_handles.empty() &&
+                !release_imported_cache_owners(program, imported_handles)) {
+                fail_engine_on_error = true;
+                throw ContextCacheOwnershipError(
+                    "failed to release imported context-cache owners after adoption failure");
+            }
+            try {
+                std::rethrow_exception(import_error);
+            } catch (const ContextCacheOwnershipError&) {
+                fail_engine_on_error = true;
+                throw;
+            } catch (...) {
+                throw;
+            }
+        }
+
+        std::vector<std::uint8_t> adopted_owners;
+        try {
+            adopted_owners.assign(imported_handles.size(), 0);
+            adopt_imported_cache_catalog(imported_private, imported_shared, imported_handles,
+                                         adopted_owners);
+        } catch (...) {
+            const std::exception_ptr adoption_error = std::current_exception();
+            const bool rolled_back_catalog = rollback_adopted_cache_catalog(program);
+            const std::span<const std::uint8_t> adopted_mask =
+                adopted_owners.size() == imported_handles.size()
+                    ? std::span<const std::uint8_t>(adopted_owners.data(), adopted_owners.size())
+                    : std::span<const std::uint8_t>{};
+            const bool released_unadopted = release_imported_cache_owners(
+                program, imported_handles, adopted_mask);
+            if (!rolled_back_catalog || !released_unadopted) {
+                fail_engine_on_error = true;
+                throw ContextCacheOwnershipError("failed to roll back imported context-cache owners");
+            }
+            try {
+                std::rethrow_exception(adoption_error);
+            } catch (const ContextCacheOwnershipError&) {
+                fail_engine_on_error = true;
+                throw;
+            } catch (...) {
+                throw;
+            }
+        }
+        if (max_publication_order >= next_publication_order) {
+            next_publication_order = max_publication_order + 1;
+        }
+        demand_window_.clear();
+        demand_epoch_ = 0;
+
+        ContextCacheSnapshotStats stats;
+        stats.bytes                  = archive_bytes;
+        stats.private_continuations = private_count;
+        stats.shared_prefixes       = shared_count;
+        for (const ImportedPrivateOwner& imported : imported_private) {
+            if (imported.session_binding) { ++stats.session_continuations; }
+            stats.checkpoints += continuation_checkpoint_count(imported.summary);
+        }
+        stats.checkpoints += shared_count;
+        return stats;
     }
 
     // Called only by EngineCore's worker at an idle boundary. Keep logical ownership and
@@ -986,18 +1248,37 @@ public:
     }
 
     [[nodiscard]] FinishResult finish(Program& program, LaneId lane, SequenceHandle sequence) {
+        return finish_impl(program, lane, sequence, false);
+    }
+
+    [[nodiscard]] FinishResult finish_cancelled(Program& program, LaneId lane,
+                                                SequenceHandle sequence) {
+        if (lane.value < lane_count_ && lanes_[lane.value] == LogicalLaneState::Active) {
+            lanes_[lane.value] = LogicalLaneState::TerminalPending;
+        }
+        return finish_impl(program, lane, sequence, true);
+    }
+
+private:
+    [[nodiscard]] FinishResult finish_impl(Program& program, LaneId lane,
+                                           SequenceHandle sequence, bool cancelled) {
         require_lane(lane, LogicalLaneState::TerminalPending);
         if (!std::holds_alternative<std::monostate>(transaction_) ||
             program.has_context_transaction()) {
             throw std::logic_error("terminal finish overlaps an open resource transaction");
         }
         ActiveEntry& active = active_[lane.value];
-        FinishResult result = program.finish(sequence);
+        FinishResult result = cancelled ? program.finish_cancelled(sequence)
+                                        : program.finish(sequence);
         if (result.status != ConsumeStatus::Consumed) {
+            if (!cancelled) {
+                throw std::logic_error(
+                    "Program could not consume a normally finished terminal sequence");
+            }
             AbortResult discarded = program.abort(sequence);
             if (discarded.status != ConsumeStatus::Consumed) {
                 throw std::logic_error(
-                    "Program could neither retain nor discard terminal sequence");
+                    "Program could neither retain nor discard cancelled terminal sequence");
             }
             release_active_references(lane);
             clear_catalog_entry(catalog_.at(active.publication_slot));
@@ -1054,6 +1335,7 @@ public:
         return result;
     }
 
+public:
     [[nodiscard]] AbortResult abort(Program& program, LaneId lane, SequenceHandle sequence) {
         if (!std::holds_alternative<std::monostate>(transaction_) ||
             program.has_context_transaction()) {
@@ -1085,6 +1367,7 @@ public:
             case CommitDisposition::Active:
                 break;
             case CommitDisposition::Finishable:
+            case CommitDisposition::CancelledFinishable:
                 lanes_[lane.value] = LogicalLaneState::TerminalPending;
                 break;
             case CommitDisposition::CancelledReleased:
@@ -1202,6 +1485,71 @@ public:
     }
 
 private:
+    inline static constexpr std::array<std::byte, 8> kContextCacheMagic{
+        std::byte{0x4e}, std::byte{0x49}, std::byte{0x4e}, std::byte{0x46},
+        std::byte{0x43}, std::byte{0x43}, std::byte{0x30}, std::byte{0x31}};
+    static constexpr std::uint32_t kContextCacheVersion    = 1;
+    static constexpr std::uint64_t kContextCacheHeaderBytes = 20;
+
+    class CountingContextCacheWriter final : public ContextCacheWriter {
+    public:
+        explicit CountingContextCacheWriter(ContextCacheWriter& writer) : writer_(writer) {}
+
+        void write(std::span<const std::byte> bytes) override {
+            if (bytes.size() > std::numeric_limits<std::uint64_t>::max() - bytes_written_) {
+                throw std::overflow_error("context-cache archive byte count overflow");
+            }
+            writer_.write(bytes);
+            bytes_written_ += bytes.size();
+        }
+
+        [[nodiscard]] std::uint64_t bytes_written() const noexcept { return bytes_written_; }
+
+    private:
+        ContextCacheWriter& writer_;
+        std::uint64_t bytes_written_ = 0;
+    };
+
+    class CountingContextCacheReader final : public ContextCacheReader {
+    public:
+        explicit CountingContextCacheReader(ContextCacheReader& reader) : reader_(reader) {}
+
+        void read_exact(std::span<std::byte> bytes) override {
+            if (bytes.size() > std::numeric_limits<std::uint64_t>::max() - bytes_read_) {
+                throw std::overflow_error("context-cache archive byte count overflow");
+            }
+            reader_.read_exact(bytes);
+            bytes_read_ += bytes.size();
+        }
+
+        [[nodiscard]] std::uint64_t remaining_bytes() const override {
+            return reader_.remaining_bytes();
+        }
+
+        [[nodiscard]] std::uint64_t bytes_read() const noexcept { return bytes_read_; }
+
+    private:
+        ContextCacheReader& reader_;
+        std::uint64_t bytes_read_ = 0;
+    };
+
+    struct PrivateSessionBinding {
+        bool indexed = false;
+        std::uint64_t publication_order = 0;
+    };
+
+    struct ImportedPrivateOwner {
+        ContinuationSummary summary;
+        std::optional<CacheSessionKey> session;
+        RetentionClass retention = RetentionClass::RecentPrivate;
+        bool session_binding = false;
+        std::uint64_t publication_order = 0;
+    };
+
+    struct ImportedSharedOwner {
+        SharedPrefixSummary summary;
+    };
+
     struct Candidate {
         std::optional<AdmissionCandidate> plan;
         bool current_session_binding = false;
@@ -1248,6 +1596,418 @@ private:
         std::uint64_t revision          = 0;
         std::uint64_t publication_order = 0;
     };
+
+    static void write_context_cache_u8(CountingContextCacheWriter& writer, std::uint8_t value) {
+        const std::array<std::byte, 1> bytes{static_cast<std::byte>(value)};
+        writer.write(bytes);
+    }
+
+    static void write_context_cache_u16(CountingContextCacheWriter& writer, std::uint16_t value) {
+        std::array<std::byte, 2> bytes{};
+        for (std::size_t index = 0; index < bytes.size(); ++index) {
+            bytes[index] = static_cast<std::byte>((value >> (index * 8U)) & 0xffU);
+        }
+        writer.write(bytes);
+    }
+
+    static void write_context_cache_u32(CountingContextCacheWriter& writer, std::uint32_t value) {
+        std::array<std::byte, 4> bytes{};
+        for (std::size_t index = 0; index < bytes.size(); ++index) {
+            bytes[index] = static_cast<std::byte>((value >> (index * 8U)) & 0xffU);
+        }
+        writer.write(bytes);
+    }
+
+    static void write_context_cache_u64(CountingContextCacheWriter& writer, std::uint64_t value) {
+        std::array<std::byte, 8> bytes{};
+        for (std::size_t index = 0; index < bytes.size(); ++index) {
+            bytes[index] = static_cast<std::byte>((value >> (index * 8U)) & 0xffU);
+        }
+        writer.write(bytes);
+    }
+
+    static std::uint8_t read_context_cache_u8(CountingContextCacheReader& reader) {
+        std::array<std::byte, 1> bytes{};
+        reader.read_exact(bytes);
+        return std::to_integer<std::uint8_t>(bytes[0]);
+    }
+
+    static std::uint16_t read_context_cache_u16(CountingContextCacheReader& reader) {
+        std::array<std::byte, 2> bytes{};
+        reader.read_exact(bytes);
+        std::uint16_t value = 0;
+        for (std::size_t index = 0; index < bytes.size(); ++index) {
+            value |= static_cast<std::uint16_t>(std::to_integer<std::uint8_t>(bytes[index]))
+                     << (index * 8U);
+        }
+        return value;
+    }
+
+    static std::uint32_t read_context_cache_u32(CountingContextCacheReader& reader) {
+        std::array<std::byte, 4> bytes{};
+        reader.read_exact(bytes);
+        std::uint32_t value = 0;
+        for (std::size_t index = 0; index < bytes.size(); ++index) {
+            value |= static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes[index]))
+                     << (index * 8U);
+        }
+        return value;
+    }
+
+    static std::uint64_t read_context_cache_u64(CountingContextCacheReader& reader) {
+        std::array<std::byte, 8> bytes{};
+        reader.read_exact(bytes);
+        std::uint64_t value = 0;
+        for (std::size_t index = 0; index < bytes.size(); ++index) {
+            value |= static_cast<std::uint64_t>(std::to_integer<std::uint8_t>(bytes[index]))
+                     << (index * 8U);
+        }
+        return value;
+    }
+
+    [[nodiscard]] PrivateSessionBinding private_session_binding(
+        std::uint32_t slot, const CatalogEntry& owner) const noexcept {
+        if (!owner.session) { return {}; }
+        const auto cell = find_session_cell(*owner.session);
+        if (!cell) { return {}; }
+        const SessionIndexEntry& binding = session_index_[*cell];
+        if (binding.slot != slot || binding.owner_id != owner.id ||
+            binding.revision != owner.revision || binding.publication_order == 0) {
+            return {};
+        }
+        return PrivateSessionBinding{.indexed = true,
+                                     .publication_order = binding.publication_order};
+    }
+
+    static void write_private_owner_metadata(CountingContextCacheWriter& writer,
+                                             const CatalogEntry& owner,
+                                             PrivateSessionBinding binding) {
+        const bool has_session = owner.session.has_value();
+        if ((binding.indexed && !has_session) ||
+            (binding.indexed && binding.publication_order == 0) ||
+            (!binding.indexed && binding.publication_order != 0) ||
+            owner.retention == RetentionClass::SharedStable ||
+            (owner.retention == RetentionClass::LiveSession && !has_session)) {
+            throw std::logic_error("private context-cache session metadata is inconsistent");
+        }
+        const std::uint8_t flags = static_cast<std::uint8_t>((has_session ? 1U : 0U) |
+                                                             (binding.indexed ? 2U : 0U));
+        write_context_cache_u8(writer, flags);
+        write_context_cache_u8(writer, static_cast<std::uint8_t>(owner.retention));
+        if (has_session) {
+            const CacheSessionKey& session = *owner.session;
+            if (session.size == 0 || session.size > session.bytes.size()) {
+                throw std::logic_error("private context-cache session key length is invalid");
+            }
+            write_context_cache_u16(writer, session.size);
+            writer.write(std::as_bytes(
+                std::span<const char>(session.bytes.data(), static_cast<std::size_t>(session.size))));
+        }
+        if (binding.indexed) { write_context_cache_u64(writer, binding.publication_order); }
+    }
+
+    [[nodiscard]] ImportedPrivateOwner read_private_owner(
+        Program& program, ProgramCacheImportSession& import_session,
+        CountingContextCacheReader& reader) const {
+        const std::uint8_t flags = read_context_cache_u8(reader);
+        const std::uint8_t retention_value = read_context_cache_u8(reader);
+        if ((flags & ~std::uint8_t{3}) != 0 ||
+            retention_value == static_cast<std::uint8_t>(RetentionClass::SharedStable) ||
+            retention_value > static_cast<std::uint8_t>(RetentionClass::Disposable)) {
+            throw std::invalid_argument("private context-cache metadata flags are invalid");
+        }
+        ImportedPrivateOwner owner;
+        owner.retention = static_cast<RetentionClass>(retention_value);
+        const bool has_session = (flags & 1U) != 0;
+        owner.session_binding = (flags & 2U) != 0;
+        if (owner.session_binding && !has_session) {
+            throw std::invalid_argument("private context-cache index has no session key");
+        }
+        if (has_session) {
+            const std::uint16_t size = read_context_cache_u16(reader);
+            if (size == 0 || size > kMaximumContextCacheSessionKeyBytes) {
+                throw std::invalid_argument("private context-cache session key length is invalid");
+            }
+            CacheSessionKey session;
+            session.size = size;
+            reader.read_exact(std::as_writable_bytes(std::span<char>(
+                session.bytes.data(), static_cast<std::size_t>(session.size))));
+            owner.session = session;
+        }
+        if (owner.session_binding) {
+            owner.publication_order = read_context_cache_u64(reader);
+            if (owner.publication_order == 0) {
+                throw std::invalid_argument("private context-cache publication order is zero");
+            }
+        }
+        if (owner.retention == RetentionClass::LiveSession && !owner.session) {
+            throw std::invalid_argument("LiveSession checkpoint has no session key");
+        }
+
+        ProgramCacheOwnerSummary summary = program.read_context_cache_owner(
+            import_session, reader, ContextCacheOwnerKind::PrivateContinuation);
+        const auto* private_summary =
+            std::get_if<ProgramCacheOwnerSummaryPrivate>(&summary);
+        if (private_summary == nullptr || !valid_continuation_summary(*private_summary)) {
+            throw std::invalid_argument("private context-cache continuation is incomplete");
+        }
+        owner.summary = std::move(*private_summary);
+        return owner;
+    }
+
+    [[nodiscard]] ImportedSharedOwner read_shared_owner(
+        Program& program, ProgramCacheImportSession& import_session,
+        CountingContextCacheReader& reader) const {
+        ProgramCacheOwnerSummary summary = program.read_context_cache_owner(
+            import_session, reader, ContextCacheOwnerKind::SharedPrefix);
+        const auto* shared_summary = std::get_if<ProgramCacheOwnerSummaryShared>(&summary);
+        if (shared_summary == nullptr || !valid_shared_prefix_summary(*shared_summary)) {
+            throw std::invalid_argument("shared-prefix context-cache owner is incomplete");
+        }
+        return ImportedSharedOwner{.summary = std::move(*shared_summary)};
+    }
+
+    [[nodiscard]] bool private_session_key_is_unique(
+        const std::vector<ImportedPrivateOwner>& private_owners, std::size_t index) const noexcept {
+        const ImportedPrivateOwner& candidate = private_owners[index];
+        if (!candidate.session_binding || !candidate.session) { return true; }
+        for (std::size_t other = 0; other < index; ++other) {
+            if (private_owners[other].session_binding && private_owners[other].session &&
+                *private_owners[other].session == *candidate.session) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    void validate_imported_cache_catalog(const std::vector<ImportedPrivateOwner>& private_owners,
+                                         const std::vector<ImportedSharedOwner>& shared_owners) const {
+        if (private_owners.size() > catalog_count_ || shared_owners.size() > shared_catalog_count_) {
+            throw std::invalid_argument("context-cache catalog exceeds the Engine's fixed capacity");
+        }
+        std::size_t checkpoint_count = shared_owners.size();
+        for (std::size_t index = 0; index < private_owners.size(); ++index) {
+            const ImportedPrivateOwner& owner = private_owners[index];
+            if (!valid_continuation_summary(owner.summary) ||
+                (owner.retention == RetentionClass::LiveSession && !owner.session) ||
+                (owner.session_binding &&
+                 (!owner.session || owner.publication_order == 0 ||
+                  !private_session_key_is_unique(private_owners, index)))) {
+                throw std::invalid_argument("private context-cache owner metadata is invalid");
+            }
+            checkpoint_count += continuation_checkpoint_count(owner.summary);
+        }
+        for (const ImportedSharedOwner& owner : shared_owners) {
+            if (!valid_shared_prefix_summary(owner.summary)) {
+                throw std::invalid_argument("shared context-cache owner metadata is invalid");
+            }
+        }
+        if (checkpoint_count > prefix_index_.size()) {
+            throw std::invalid_argument("context-cache checkpoint index exceeds fixed capacity");
+        }
+    }
+
+    void validate_committed_cache_owners(
+        const std::vector<ImportedPrivateOwner>& private_owners,
+        const std::vector<ImportedSharedOwner>& shared_owners,
+        const std::vector<ProgramCacheOwnerImport>& handles) const {
+        if (handles.size() != private_owners.size() + shared_owners.size()) {
+            throw ContextCacheOwnershipError("Program imported an incomplete owner list");
+        }
+        for (std::size_t index = 0; index < shared_owners.size(); ++index) {
+            const auto* owner = std::get_if<ProgramImportedSharedOwner>(&handles[index]);
+            if (owner == nullptr || owner->summary != shared_owners[index].summary) {
+                throw ContextCacheOwnershipError("Program changed a shared owner during import");
+            }
+        }
+        for (std::size_t index = 0; index < private_owners.size(); ++index) {
+            const auto* owner =
+                std::get_if<ProgramImportedPrivateOwner>(&handles[shared_owners.size() + index]);
+            if (owner == nullptr || owner->summary != private_owners[index].summary) {
+                throw ContextCacheOwnershipError("Program changed a private owner during import");
+            }
+        }
+    }
+
+    [[nodiscard]] bool release_imported_cache_owners(
+        Program& program, std::vector<ProgramCacheOwnerImport>& owners,
+        std::span<const std::uint8_t> already_adopted = {}) noexcept {
+        if (!already_adopted.empty() && already_adopted.size() != owners.size()) { return false; }
+        bool released = true;
+        for (std::size_t reverse_index = owners.size(); reverse_index != 0; --reverse_index) {
+            const std::size_t index = reverse_index - 1;
+            if (!already_adopted.empty() && already_adopted[index] != 0) { continue; }
+            auto& owner = owners[index];
+            if (auto* private_owner = std::get_if<ProgramImportedPrivateOwner>(&owner)) {
+                if (program.release_continuation(std::move(private_owner->handle)).status !=
+                    ConsumeStatus::Consumed) {
+                    released = false;
+                }
+            } else if (auto* shared_owner = std::get_if<ProgramImportedSharedOwner>(&owner)) {
+                if (program.release_shared_prefix(std::move(shared_owner->handle)).status !=
+                    ConsumeStatus::Consumed) {
+                    released = false;
+                }
+            } else {
+                released = false;
+            }
+        }
+        return released;
+    }
+
+    void adopt_imported_cache_catalog(const std::vector<ImportedPrivateOwner>& private_owners,
+                                      const std::vector<ImportedSharedOwner>& shared_owners,
+                                      std::vector<ProgramCacheOwnerImport>& handles,
+                                      std::span<std::uint8_t> adopted_owners) {
+        if (adopted_owners.size() != handles.size() ||
+            handles.size() != private_owners.size() + shared_owners.size()) {
+            throw ContextCacheOwnershipError("committed context-cache owner vector is malformed");
+        }
+        for (SessionIndexEntry& entry : session_index_) { entry = {}; }
+        for (PrefixIndexEntry& entry : prefix_index_) { entry = {}; }
+
+        for (std::size_t index = 0; index < shared_owners.size(); ++index) {
+            auto* imported = std::get_if<ProgramImportedSharedOwner>(&handles[index]);
+            if (imported == nullptr) {
+                throw ContextCacheOwnershipError("committed shared owner changed kind before adopt");
+            }
+            SharedCatalogEntry& entry = shared_catalog_[index];
+            entry.state = SharedCatalogState::Catalogued;
+            entry.id    = next_shared_prefix_id_++;
+            if (entry.id == 0) { entry.id = next_shared_prefix_id_++; }
+            entry.summary = std::move(imported->summary);
+            entry.handle.emplace(std::move(imported->handle));
+            adopted_owners[index] = 1;
+            entry.observation = RetentionObservation{.retention_class = RetentionClass::SharedStable};
+            entry.transaction_pins = 0;
+            entry.explicit_credit = false;
+            entry.credit_expiry_epoch = 0;
+        }
+
+        for (std::size_t index = 0; index < private_owners.size(); ++index) {
+            auto* imported = std::get_if<ProgramImportedPrivateOwner>(
+                &handles[shared_owners.size() + index]);
+            if (imported == nullptr) {
+                throw ContextCacheOwnershipError("committed private owner changed kind before adopt");
+            }
+            CatalogEntry& entry = catalog_[index];
+            entry.state = CatalogState::Catalogued;
+            entry.id    = next_continuation_id_++;
+            if (entry.id == 0) { entry.id = next_continuation_id_++; }
+            assign_continuation_summary(entry.summary, imported->summary);
+            entry.handle.emplace(std::move(imported->handle));
+            adopted_owners[shared_owners.size() + index] = 1;
+            entry.session   = private_owners[index].session;
+            entry.retention = private_owners[index].retention;
+            migrate_observations(entry, entry.summary, entry.retention);
+            if (private_owners[index].session_binding) {
+                const bool published = publish_session(
+                    *private_owners[index].session, static_cast<std::uint32_t>(index), entry.id,
+                    entry.revision, private_owners[index].publication_order);
+                if (!published) {
+                    throw std::logic_error("restored SessionIndex binding could not be published");
+                }
+            }
+        }
+        rebuild_prefix_index();
+    }
+
+    [[nodiscard]] bool rollback_adopted_cache_catalog(Program& program) noexcept {
+        bool released = true;
+        for (CatalogEntry& entry : catalog_) {
+            if (entry.state == CatalogState::Catalogued && entry.handle) {
+                if (program.release_continuation(std::move(*entry.handle)).status !=
+                    ConsumeStatus::Consumed) {
+                    released = false;
+                }
+            }
+            clear_catalog_entry(entry);
+        }
+        for (SharedCatalogEntry& entry : shared_catalog_) {
+            if (entry.state == SharedCatalogState::Catalogued && entry.handle) {
+                if (program.release_shared_prefix(std::move(*entry.handle)).status !=
+                    ConsumeStatus::Consumed) {
+                    released = false;
+                }
+            }
+            clear_shared_entry(entry);
+        }
+        for (SessionIndexEntry& entry : session_index_) { entry = {}; }
+        for (PrefixIndexEntry& entry : prefix_index_) { entry = {}; }
+        return released;
+    }
+
+    void require_idle_cache_catalog(const Program& program) const {
+        if (!std::holds_alternative<std::monostate>(transaction_) ||
+            program.has_context_transaction()) {
+            throw std::logic_error("context-cache operation overlaps a resource transaction");
+        }
+        for (std::uint32_t lane = 0; lane < lane_count_; ++lane) {
+            if (lanes_[lane] != LogicalLaneState::Free || active_[lane].occupied) {
+                throw std::logic_error("context-cache operation requires inactive lanes");
+            }
+        }
+        for (std::uint32_t slot = 0; slot < catalog_count_; ++slot) {
+            const CatalogEntry& entry = catalog_[slot];
+            if ((entry.state == CatalogState::Catalogued &&
+                 (!entry.handle || private_has_active_edge(slot))) ||
+                (entry.state != CatalogState::Catalogued &&
+                 (entry.state != CatalogState::Vacant || entry.handle))) {
+                throw std::logic_error("context-cache operation found an unstable private catalog");
+            }
+        }
+        for (std::uint32_t slot = 0; slot < shared_catalog_count_; ++slot) {
+            const SharedCatalogEntry& entry = shared_catalog_[slot];
+            if ((entry.state == SharedCatalogState::Catalogued &&
+                 (!entry.handle || entry.transaction_pins != 0 ||
+                  shared_active_edge_count(slot) != 0)) ||
+                (entry.state != SharedCatalogState::Catalogued &&
+                 (entry.state != SharedCatalogState::Vacant || entry.handle ||
+                  entry.transaction_pins != 0))) {
+                throw std::logic_error("context-cache operation found an unstable shared catalog");
+            }
+        }
+    }
+
+    void require_empty_cache_catalog() const {
+        for (const CatalogEntry& entry : catalog_) {
+            if (entry.state != CatalogState::Vacant || entry.handle) {
+                throw std::logic_error("context-cache restore requires an empty private catalog");
+            }
+        }
+        for (const SharedCatalogEntry& entry : shared_catalog_) {
+            if (entry.state != SharedCatalogState::Vacant || entry.handle ||
+                entry.transaction_pins != 0) {
+                throw std::logic_error("context-cache restore requires an empty shared catalog");
+            }
+        }
+        for (const SessionIndexEntry& entry : session_index_) {
+            if (entry.state == SessionIndexState::Occupied) {
+                throw std::logic_error("context-cache restore requires an empty SessionIndex");
+            }
+        }
+        for (const PrefixIndexEntry& entry : prefix_index_) {
+            if (entry.occupied) {
+                throw std::logic_error("context-cache restore requires an empty PrefixIndex");
+            }
+        }
+    }
+
+    void validate_session_index_consistency() const {
+        for (const SessionIndexEntry& binding : session_index_) {
+            if (binding.state != SessionIndexState::Occupied) { continue; }
+            if (binding.slot >= catalog_count_ || binding.owner_id == 0 ||
+                binding.publication_order == 0) {
+                throw std::logic_error("SessionIndex has an invalid durable binding");
+            }
+            const CatalogEntry& owner = catalog_[binding.slot];
+            if (owner.state != CatalogState::Catalogued || !owner.handle ||
+                owner.id != binding.owner_id || owner.revision != binding.revision ||
+                !owner.session || *owner.session != binding.key) {
+                throw std::logic_error("SessionIndex binding does not identify its private owner");
+            }
+        }
+    }
 
     struct PrefixIndexEntry {
         bool occupied = false;

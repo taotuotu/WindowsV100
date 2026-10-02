@@ -407,6 +407,10 @@ struct PromptOptions {
     bool enable_thinking                = true;
     std::optional<ReasoningEffort> reasoning_effort;
     bool preserve_thinking = false;
+    // Retain the canonical empty reasoning prologue in completed assistant history. This keeps
+    // non-thinking generation and subsequent rendering token-identical without retaining a
+    // non-empty reasoning block. Registered products opt in explicitly.
+    bool preserve_empty_thinking = false;
     bool add_vision_id     = false;
     std::vector<std::string> tool_jsons;
 };

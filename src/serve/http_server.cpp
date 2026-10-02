@@ -722,6 +722,7 @@ void HttpServer::register_routes() {
             {"draft_tokens", speculative.draft_tokens},
             {"proposal_head", proposal_head_name(speculative.proposal_head)},
             {"prefix_reuse", service_->options().allow_prefix_reuse},
+            {"disk_cache_enabled", service_->disk_cache_stats().enabled},
             {"vision_enabled", service_->options().enable_vision},
             {"image_formats", nlohmann::json::array({"png", "jpeg", "bmp"})},
             {"video_enabled", false},
@@ -889,6 +890,18 @@ void HttpServer::handle_ui_metrics(const httplib::Request&, httplib::Response& r
                                            {"busy", session.busy},
                                            {"owner", session.owner},
                                            {"switch_count", session.switch_count}};
+        const SessionCacheStoreStats disk = service_->disk_cache_stats();
+        response["disk_cache"] = Json{{"enabled", disk.enabled},
+                                      {"bytes", disk.disk_bytes},
+                                      {"sessions", disk.sessions},
+                                      {"saves", disk.saves},
+                                      {"restores", disk.restores},
+                                      {"misses", disk.misses},
+                                      {"failures", disk.failures},
+                                      {"last_saved_bytes", disk.last_saved_bytes},
+                                      {"last_restored_bytes", disk.last_restored_bytes},
+                                      {"operation", disk.operation},
+                                      {"last_error_code", disk.last_error_code}};
     }
     res.status = available ? 200 : 503;
     res.set_header("Cache-Control", "no-store");

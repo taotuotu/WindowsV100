@@ -32,7 +32,7 @@ $BuildDirectory = [System.IO.Path]::GetFullPath($BuildDirectory)
 $excludedDirectoryNames = @(
     '.git', '.local', '.codex', 'build', 'dist', 'logs', 'results', 'models', 'profiles'
 )
-$excludedExtensions = @('.ninfer', '.gguf', '.safetensors', '.log', '.nsys-rep', '.ncu-rep')
+$excludedExtensions = @('.ninfer', '.gguf', '.safetensors', '.log', '.nsys-rep', '.ncu-rep', '.snap', '.head', '.tmp')
 $rootFiles = @(
     '.clang-format', '.clangd', '.dockerignore', '.gitattributes', '.gitignore',
     'AGENTS.md', 'CMakeLists.txt', 'CONTRIBUTING.md', 'Dockerfile', 'LICENSE', 'NOTICE',
@@ -75,6 +75,7 @@ function Test-PackagePathAllowed {
         if ($excludedDirectoryNames -contains $segment.ToLowerInvariant()) { return $false }
     }
     $leaf = $segments[-1]
+    if ($leaf.StartsWith('ninfer-session-cache-', [StringComparison]::OrdinalIgnoreCase)) { return $false }
     if ($leaf.EndsWith('.requests.jsonl', [StringComparison]::OrdinalIgnoreCase)) { return $false }
     if ($excludedExtensions -contains [System.IO.Path]::GetExtension($leaf).ToLowerInvariant()) { return $false }
     if ($segments.Count -eq 1) { return $rootFiles -contains $leaf }
@@ -299,6 +300,10 @@ function Write-ReleaseManifest {
             mtp_draft_tokens = 6
             prefill_chunk_tokens = 2048
             max_concurrency = 1
+            disk_cache_enabled = $true
+            disk_cache_directory = '.local/context-cache'
+            disk_cache_mib = 32768
+            disk_cache_sessions = 8
         }
     }
     return $manifest

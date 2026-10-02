@@ -459,6 +459,11 @@
               <input id="enable-thinking" type="checkbox">
               <span>启用思考模式</span>
             </label>
+            <label class="check-row">
+              <input id="preserve-thinking" type="checkbox" checked>
+              <span>保留历史思考，复用已计算的上下文</span>
+            </label>
+            <p class="settings-footnote">关闭保留会删除历史思考，并可能从上一轮回答前重新 Prefill。保留的思考也计入上下文长度。</p>
             <label class="field">
               <span class="field-label">API Key（可选）</span>
               <input id="api-key" type="password" autocomplete="off" spellcheck="false" placeholder="留空则不发送">
@@ -507,7 +512,8 @@
         <div class="global-metrics-body">
           <p class="global-metrics-note">数据来自服务端全局统计。最近采样窗口的服务总吞吐，与单请求解码阶段平均不同。解码计数不含预填充产生的首 token。</p>
           <p id="global-context-session" class="global-context-session">会话缓存状态等待获取。</p>
-          <p class="global-metrics-note">网页每轮仍发送完整消息；连续对话按会话 ID 滚动复用前缀缓存，实际需 Prefill 显示未命中 tokens。新对话只换 ID，下次请求到达后才切换缓存，不会在点击时清理缓存。</p>
+          <p id="global-disk-cache" class="global-context-session" role="status">磁盘缓存状态等待获取。</p>
+          <p class="global-metrics-note">网页每轮发送完整消息；连续对话按会话 ID 复用已计算的前缀，实际需 Prefill 显示未命中 tokens。开启磁盘缓存后，每轮结束或停止时保存完整检查点，切回同一会话时恢复。保存期间请等待；“清理全部缓存”同时删除内存和磁盘检查点。</p>
           <div class="global-metrics-grid">
             <div class="global-metrics-card">
               <span class="global-metrics-label">服务总解码</span>
@@ -640,6 +646,7 @@
         temperature: document.getElementById("temperature"),
         maxTokens: document.getElementById("max-tokens"),
         thinking: document.getElementById("enable-thinking"),
+        preserveThinking: document.getElementById("preserve-thinking"),
         apiKey: document.getElementById("api-key"),
         clearCache: document.getElementById("clear-cache"),
         shutdownServer: document.getElementById("shutdown-server"),
@@ -675,6 +682,7 @@
         globalChartScale: document.getElementById("global-chart-scale"),
         globalRequestsBody: document.getElementById("global-requests-body"),
         globalContextSession: document.getElementById("global-context-session"),
+        globalDiskCache: document.getElementById("global-disk-cache"),
         welcome: document.getElementById("welcome"),
         conversation: document.getElementById("conversation"),
         alert: document.getElementById("global-alert")
@@ -724,7 +732,7 @@
       function updateManagementButtons() {
         const imagesBlocked = pendingImages.some(item => item.state !== "ready") ||
           (pendingImages.length > 0 && !canAttachImages());
-        ui.send.disabled = Boolean(activeRequest || cacheClearInFlight || shutdownInFlight || serviceShutdownRequested || imagesBlocked);
+        ui.send.disabled = Boolean(activeRequest || globalContextBusy || cacheClearInFlight || shutdownInFlight || serviceShutdownRequested || imagesBlocked);
         ui.newChat.disabled = Boolean(activeRequest || cacheClearInFlight || shutdownInFlight);
         ui.clearCache.disabled = Boolean(activeRequest || globalContextBusy || cacheClearInFlight || shutdownInFlight || serviceShutdownRequested);
         ui.shutdownServer.disabled = Boolean(cacheClearInFlight || shutdownInFlight || serviceShutdownRequested);
@@ -837,6 +845,7 @@
         ui.globalLatestTtft.textContent = "TTFT —";
         globalContextBusy = true;
         ui.globalContextSession.textContent = "会话缓存状态不可用，暂不允许清理缓存。";
+        ui.globalDiskCache.textContent = "磁盘缓存状态不可用。";
         renderGlobalRequests([]);
         updateManagementButtons();
       }
@@ -859,6 +868,30 @@
         globalContextBusy = context.mode !== "exclusive" || !busyKnown || context.busy;
         ui.globalContextSession.textContent = `${mode} · ${busyLabel} · 当前所有者 ${owner} · 会话切换 ${switches === null ? "—" : formatCount(switches)}`;
         updateManagementButtons();
+      }
+
+      function renderDiskCache(disk) {
+        if (!disk || typeof disk.enabled !== "boolean") {
+          ui.globalDiskCache.textContent = "当前服务未提供磁盘缓存状态。";
+          return;
+        }
+        if (!disk.enabled) {
+          ui.globalDiskCache.textContent = "磁盘缓存未启用。";
+          return;
+        }
+        const operations = { idle: "就绪", saving: "保存中", restoring: "恢复中", clearing: "清理中" };
+        const statuses = { none: "", no_checkpoint: "尚无完整检查点", miss: "该会话尚无磁盘记录",
+          identity_mismatch: "配置不匹配，已冷启动", checksum_mismatch: "校验失败",
+          budget_exceeded: "磁盘预算不足，保留旧记录", io_error: "磁盘读写失败",
+          engine_error: "快照处理失败", fallback_restored: "已恢复上一代", cancelled: "恢复已取消" };
+        const bytes = metricNumber(disk.bytes, true);
+        const sessions = metricNumber(disk.sessions, true);
+        const saves = metricNumber(disk.saves, true);
+        const restores = metricNumber(disk.restores, true);
+        const operation = operations[disk.operation] || "状态未知";
+        const status = Object.prototype.hasOwnProperty.call(statuses, disk.last_error_code)
+          ? statuses[disk.last_error_code] : "状态未知";
+        ui.globalDiskCache.textContent = `磁盘缓存 ${operation} · ${bytes === null ? "—" : (bytes / 1073741824).toFixed(2)} GiB · ${sessions === null ? "—" : sessions} 个会话 · 保存 ${saves === null ? "—" : saves} / 恢复 ${restores === null ? "—" : restores}${status ? ` · ${status}` : ""}`;
       }
 
       function renderGlobalMetricsTrend() {
@@ -1042,6 +1075,7 @@
         ui.globalPrefilling.textContent = prefilling === null ? "—" : formatCount(prefilling);
         ui.globalSchedulerExtra.textContent = `解码就绪 ${decodeReady === null ? "—" : formatCount(decodeReady)} · 准备上下文 ${materializing === null ? "—" : formatCount(materializing)}`;
         renderGlobalContextSession(payload.context_session);
+        renderDiskCache(payload.disk_cache);
         renderGlobalRequests(payload.recent_requests);
       }
 
@@ -1950,7 +1984,7 @@
 
       async function sendMessage(text, imageAttachments = []) {
         const cleanText = text.trim();
-        if ((!cleanText && imageAttachments.length === 0) || activeRequest) return;
+        if ((!cleanText && imageAttachments.length === 0) || activeRequest || globalContextBusy) return;
         const userText = cleanText || "请描述图像";
         clearAlert();
         ui.welcome.hidden = true;
@@ -1994,6 +2028,7 @@
           temperature: boundedNumber(ui.temperature, 0, 0, 2),
           maxTokens: Math.round(boundedNumber(ui.maxTokens, 4096, 1, 32768)),
           thinking: ui.thinking.checked,
+          preserveThinking: ui.preserveThinking.checked,
           apiKey: ui.apiKey.value.trim()
         };
         const headers = { "Content-Type": "application/json" };
@@ -2009,7 +2044,8 @@
           prompt_cache_options: { mode: "implicit" },
           timings_per_token: true,
           return_progress: true,
-          enable_thinking: requestSettings.thinking
+          enable_thinking: requestSettings.thinking,
+          preserve_thinking: requestSettings.preserveThinking
         };
 
         try {
@@ -2060,6 +2096,10 @@
         } finally {
           if (activeRequest === req) {
             activeRequest = null;
+            // The server may still be freezing a cancelled request or committing its snapshot.
+            // Keep the draft editable while the next metrics sample releases Send.
+            globalContextBusy = true;
+            requestGlobalMetricsRefresh();
             setBusy(false);
             ui.prompt.focus();
           }
@@ -2069,7 +2109,7 @@
 
       ui.form.addEventListener("submit", event => {
         event.preventDefault();
-        if (activeRequest || cacheClearInFlight || shutdownInFlight || serviceShutdownRequested) return;
+        if (activeRequest || globalContextBusy || cacheClearInFlight || shutdownInFlight || serviceShutdownRequested) return;
         const text = ui.prompt.value;
         if (!text.trim() && pendingImages.length === 0) return;
         if (pendingImages.some(item => item.state === "reading")) {

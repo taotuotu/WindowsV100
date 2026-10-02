@@ -108,6 +108,7 @@ struct ChatRenderOptions {
     bool enable_thinking       = true;
     std::optional<ReasoningEffort> reasoning_effort;
     std::optional<bool> preserve_thinking;
+    bool preserve_empty_thinking = false;
     bool add_vision_id = false;
     std::vector<std::string> tool_jsons;
     std::vector<PromptCacheMarker> cache_markers;

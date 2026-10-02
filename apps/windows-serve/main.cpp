@@ -231,7 +231,10 @@ int run(const std::vector<std::string>& raw_arguments) {
             return 1;
         }
 
-        ninfer::serve::GenerationService service(options, startup_log.observer());
+        ninfer::serve::GenerationService service(
+            options, startup_log.observer(), [logger](std::string_view detail) {
+                logger->error("context cache persistence failed | {}", detail);
+            });
         startup_log.engine_ready(service.load_summary());
         operational_log.engine_capacity(service);
 

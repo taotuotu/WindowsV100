@@ -41,6 +41,11 @@ struct ServeOptions {
     std::uint32_t media_preprocess_threads = 0;
     std::size_t response_store_max_records = kDefaultResponseStoreRecords;
     std::size_t response_store_max_bytes   = kDefaultResponseStoreBytes;
+#if defined(NINFER_WINDOWS_SERVE)
+    std::filesystem::path context_disk_cache_directory = ".local/context-cache";
+    std::uint64_t context_disk_cache_bytes = 32ULL << 30;
+    std::uint32_t context_disk_cache_sessions = 8;
+#endif
     int device                             = 0;
     KvCacheStorage kv_cache                = KvCacheStorage::BFloat16;
     SpeculativeOptions speculative;

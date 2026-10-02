@@ -272,6 +272,12 @@ ninfer::PromptInput to_prompt_input(const GenerationRequest& request,
     input.options.enable_thinking                  = semantics.enable_thinking;
     input.options.reasoning_effort                 = semantics.reasoning_effort;
     input.options.preserve_thinking                = semantics.preserve_thinking;
+#if defined(NINFER_WINDOWS_SERVE)
+    // Non-thinking generation still starts with a canonical empty <think> block. Preserve that
+    // empty prologue in later history so a finished answer remains an exact reusable prefix.
+    // Non-empty reasoning continues to follow preserve_thinking.
+    input.options.preserve_empty_thinking          = true;
+#endif
     input.options.add_vision_id                    = false;
     const std::vector<const ToolDefinition*> tools = effective_tools(request);
     input.options.tool_jsons.reserve(tools.size());

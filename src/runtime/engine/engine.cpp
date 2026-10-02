@@ -553,6 +553,44 @@ void Engine::clear_context_cache() {
         impl_->core);
 }
 
+ContextCacheSnapshotStats Engine::save_context_cache(ContextCacheWriter& writer) {
+    if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
+    if (impl_->options.purpose != EnginePurpose::Generation) {
+        throw std::logic_error("save_context_cache requires a Generation Engine");
+    }
+    return std::visit(
+        [&](auto& core) -> ContextCacheSnapshotStats {
+            using CoreState = std::remove_cvref_t<decltype(core)>;
+            if constexpr (std::is_same_v<CoreState, std::unique_ptr<Impl::Core27>> ||
+                          std::is_same_v<CoreState, std::unique_ptr<Impl::Core35>>) {
+                if (core == nullptr) { throw std::logic_error("Engine core is unavailable"); }
+                return core->save_context_cache(writer);
+            } else {
+                throw std::logic_error("save_context_cache requires a Generation Engine");
+            }
+        },
+        impl_->core);
+}
+
+ContextCacheSnapshotStats Engine::load_context_cache(ContextCacheReader& reader) {
+    if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
+    if (impl_->options.purpose != EnginePurpose::Generation) {
+        throw std::logic_error("load_context_cache requires a Generation Engine");
+    }
+    return std::visit(
+        [&](auto& core) -> ContextCacheSnapshotStats {
+            using CoreState = std::remove_cvref_t<decltype(core)>;
+            if constexpr (std::is_same_v<CoreState, std::unique_ptr<Impl::Core27>> ||
+                          std::is_same_v<CoreState, std::unique_ptr<Impl::Core35>>) {
+                if (core == nullptr) { throw std::logic_error("Engine core is unavailable"); }
+                return core->load_context_cache(reader);
+            } else {
+                throw std::logic_error("load_context_cache requires a Generation Engine");
+            }
+        },
+        impl_->core);
+}
+
 void Engine::reset_memory_peaks() noexcept {
     if (impl_ == nullptr) { return; }
     std::visit(

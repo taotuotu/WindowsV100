@@ -981,6 +981,30 @@ Context cache disabled 时采用 root-only 语义：不读取或发布 inactive 
 公开默认值和启动命令由 `EngineOptions`、[CLI](../cli.md)与 [Serving](../serving.md)维护，不在本架构
 文档中复制。
 
+### 11.1 Windows durable session snapshots
+
+Windows serving 可以将 idle Engine catalog 写成一个不透明的磁盘快照，供以后切回会话时恢复。快照是
+完整的 Engine archive：包含具有有效 SessionIndex binding 的 private continuation，以及能由这些
+continuations共享的 private/shared checkpoint frontier；它不是endpoint文本、token日志或只含
+`SessionEndpoint` 的简化副本。只有Engine报告至少一个可恢复的session continuation时，Store才可提交
+新head。Shared-only导出可以是格式完整的Engine archive，但不能替换最后一个可恢复的private session代。
+
+外层Store对每个Engine归档做全流checksum与complete marker，绑定artifact whole-file SHA256、模型/权重
+ID、KV dtype、spec backend、draft window、proposal head、存储schema revision和session key digest。Engine
+归档与Program owner record另行校验自身magic/version、owner summary、target StateImage/KV geometry、
+KV profile、backend/MTP mode和owner completeness。恢复先验证外层身份/完整性，再调用Engine流式导入；
+Engine的unpublished import必须完整回滚才允许尝试旧代或冷启动。
+为了从上一代安全checkpoint替换同一session当前已失效的内存目录，Store可在候选通过完整身份和checksum
+验证后、Engine import之前清理一次当前inactive catalog；若没有可验证磁盘候选，则保留现有内存目录。
+
+磁盘写入最多使用32GiB和8个会话（可配置）。新快照完整写入临时文件、FlushFileBuffers后原子换入generation，
+再原子替换head；上一已提交代保留为fallback，临时/残缺generation不可被选择。当前实现每个terminal
+保存都会重写完整Engine archive，数GiB归档可能延后下一请求；artifact启动时完整SHA也会增加一次启动I/O。
+恢复在导入前先完整顺序读取候选归档验证checksum，再由Engine读取并导入一次，因此大归档切回时也有
+checksum扫描与导入的双重读取成本。这些是磁盘/启动成本，不改变物理Device或Host容量，也不为恢复额外分配GPU内存。不能得到安全idle
+snapshot时使用旧完整代；这不承诺任意断电/强杀可恢复到最后一个token。清理缓存必须同时移除当前Engine
+inactive catalog和所有disk session generations。
+
 ---
 
 ## 12. 核心不变量

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ninfer/context_cache.h"
 #include "ninfer/types.h"
 
 #include <chrono>
@@ -113,6 +114,16 @@ public:
     // Generation operation: it throws std::logic_error while requests or context transactions
     // are active. It preserves model weights and cumulative runtime counters.
     void clear_context_cache();
+
+    // Writes every catalogued private continuation and shared prefix as an opaque, streamed
+    // snapshot. This is an idle-only Generation operation. The caller owns framing, durable
+    // commit, and the identity of the backing store.
+    [[nodiscard]] ContextCacheSnapshotStats save_context_cache(ContextCacheWriter& writer);
+
+    // Restores a complete context-cache snapshot into an empty Generation Engine catalog. The
+    // snapshot is read and validated on the Engine worker before any restored owner is published.
+    // A failed read or import leaves the Engine catalog unchanged.
+    [[nodiscard]] ContextCacheSnapshotStats load_context_cache(ContextCacheReader& reader);
 
     void reset_memory_peaks() noexcept;
 

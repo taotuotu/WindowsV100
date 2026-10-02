@@ -7,6 +7,9 @@
 #include "ninfer/engine.h"
 #include "serve/request.h"
 #include "serve/serve_options.h"
+#if defined(NINFER_WINDOWS_SERVE)
+#include "serve/session_cache.h"
+#endif
 
 #include <chrono>
 #include <cstddef>
@@ -15,6 +18,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace ninfer::serve {
@@ -100,11 +104,15 @@ struct PreparedRequest {
     std::optional<std::uint32_t> thinking_budget;
     std::optional<ninfer::ReasoningEffort> effective_reasoning_effort;
     bool preserve_thinking = false;
+#if defined(NINFER_WINDOWS_SERVE)
+    std::optional<std::string> cache_session;
+#endif
 };
 
 class GenerationService {
 public:
-    explicit GenerationService(ServeOptions options, StartupObserver startup_observer = {});
+    explicit GenerationService(ServeOptions options, StartupObserver startup_observer = {},
+                               std::function<void(std::string_view)> cache_failure_observer = {});
 
     [[nodiscard]] const ServeOptions& options() const noexcept { return options_; }
 
@@ -144,6 +152,7 @@ public:
     void request_shutdown() noexcept;
 #if defined(NINFER_WINDOWS_SERVE)
     [[nodiscard]] ContextSessionInfo context_session_info() const;
+    [[nodiscard]] SessionCacheStoreStats disk_cache_stats() const;
     void clear_context_cache() const;
 #endif
 
@@ -170,6 +179,10 @@ private:
     std::unique_ptr<ninfer::Engine> engine_;
     ninfer::PromptCapabilities prompt_capabilities_;
     std::shared_ptr<RequestCapacity> request_capacity_;
+    std::function<void(std::string_view)> cache_failure_observer_;
+#if defined(NINFER_WINDOWS_SERVE)
+    std::unique_ptr<SessionCacheStore> disk_cache_;
+#endif
 };
 
 } // namespace ninfer::serve

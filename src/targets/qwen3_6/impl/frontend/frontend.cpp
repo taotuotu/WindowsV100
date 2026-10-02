@@ -326,6 +326,7 @@ fi::ChatRenderOptions render_options(const PromptOptions& options,
                                    .enable_thinking   = options.enable_thinking,
                                    .reasoning_effort  = options.reasoning_effort,
                                    .preserve_thinking = options.preserve_thinking,
+                                   .preserve_empty_thinking = options.preserve_empty_thinking,
                                    .add_vision_id     = options.add_vision_id,
                                    .tool_jsons        = options.tool_jsons};
     rendered.cache_markers.assign(cache_markers.begin(), cache_markers.end());

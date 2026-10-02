@@ -7,7 +7,9 @@ Anthropic-compatible HTTP endpoints over one resident NInfer Engine.
 For the local Windows/V100 target, build and launch `ninfer-windows-serve` as described in
 [Windows/V100](windows-v100.md). Its public defaults are alias `qwen3.8-27b`, port 8110, context/KV
 capacity 143600, automatic 32GB SM70 device selection, BF16 KV, MTP6, prefill chunk 2048,
-and one active request. Personal
+and one active request. Its local disk continuation cache defaults to `.local/context-cache`,
+32 GiB and eight sessions; use Windows-only `--no-context-disk-cache` or `--context-disk-cache`
+with `--context-disk-cache-mib` / `--context-disk-cache-sessions` to configure it. Personal
 settings may override these through `.local/windows-server.psd1`. Add `--vision` (launcher
 `-Vision`) for PNG, JPEG, and BMP images. This build uses native WIC decoding and WinHTTP media
 acquisition; video, GIF, TIFF, and WebP are unsupported. Remote URLs require Windows 10 21H1 or
@@ -18,12 +20,17 @@ That Windows target also serves its embedded browser chat page at `GET /`. It ca
 entering an optional API key; API requests still use the configured authentication policy. The page
 uses the existing Chat Completions stream with `timings_per_token`, `return_progress`, and usage
 enabled. It displays server decode timing separately from client time to first text and keeps chat
-history only in browser page memory. Source and launch instructions are in the Windows guide.
+history only in browser page memory. Its “preserve history reasoning” checkbox defaults on and
+sends `preserve_thinking=true`; turning it off removes non-empty historical reasoning and can
+require replaying a larger prompt suffix. External clients that include actual historical thought
+should return it as `reasoning_content` and send `preserve_thinking=true`, or launch with
+`--preserve-thinking`. The general server default remains false. Source and launch instructions
+are in the Windows guide.
 
 `GET /ui/model-info` is a Windows UI metadata endpoint, protected by the configured API key. It
 reports the resident Engine's canonical model/weights IDs, artifact basename, KV storage,
 speculation, context capacity, device ordinal, prefix-reuse setting, `vision_enabled`,
-`image_formats` (PNG/JPEG/BMP), and `video_enabled:false`. It does not change the
+`image_formats` (PNG/JPEG/BMP), `video_enabled:false`, and `disk_cache_enabled`. It does not change the
 OpenAI public model alias or `/v1/models` schema and returns 503 when the service is unavailable.
 
 `GET /ui/metrics` is the Windows UI global speed endpoint under the same API-key policy. Schema
@@ -33,7 +40,9 @@ and at most 32 anonymous recent request records. It covers the shared lifecycle 
 Responses and Anthropic generation, whether streaming or aggregate, independently of JSONL
 logging. A request enters these counters at generation preparation; authentication/JSON-parse
 failures and monitoring polls are not generation attempts. Counter/history updates use short
-locks; querying published RuntimeStats does not synchronize GPU work. Unavailable service
+locks; querying published RuntimeStats does not synchronize GPU work. On Windows, `disk_cache`
+adds enabled state, disk bytes, session/save/restore/miss/failure counts, last save/restore sizes,
+current operation and a non-sensitive status code. Unavailable service
 returns 503 with `available:false` and the same schema. No prompt, generated text, API key,
 client address or full artifact path is exposed.
 
@@ -815,6 +824,10 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--log-stats-interval-ms N` | aggregate throughput report interval; `0` disables it | `5000` |
 | `--log-level trace\|debug\|info\|warning\|error\|critical\|off` | pretty stderr verbosity | `info` |
 | `--device N` | CUDA device index | `0` |
+| `--context-disk-cache DIR` | Windows: local Engine continuation snapshot directory | `.local/context-cache` |
+| `--no-context-disk-cache` | Windows: disable disk session persistence | enabled |
+| `--context-disk-cache-mib N` | Windows: total disk snapshot budget | `32768` |
+| `--context-disk-cache-sessions N` | Windows: retained session count limit | `8` |
 | `--context-cost-presets FILE` | optional runtime context-cost preset registry | generic + compiled defaults |
 | `--max-request-mib N` | body-size limit before JSON parsing | `384` |
 | `--media-cache-mib N` | LRU-retained prepared BF16 media payloads; `0` disables retention | `1024` |
@@ -984,9 +997,14 @@ raw counters and seconds over rounded stderr rates.
 
 ## Execution behavior
 
-The Windows text server additionally enforces the [exclusive-session policy](windows-v100.md#当前会话独占缓存): one generation request for its complete preparation/response lifetime, with HTTP429 `inference_busy` for a competing request. A validated request changing the session identity clears all inactive private/shared Engine checkpoints before submission. `X-NInfer-Session` selects that identity; Chat/Anthropic without the header derive it from the initial user turn, while Responses retains its response-chain identity. These Windows rules override the general multi-request ingress behavior below. Read-only UI/model/token-count calls do not clear or claim a generation cache session.
+The Windows text server additionally enforces the [exclusive-session policy](windows-v100.md#当前会话独占缓存): one generation request for its complete preparation/response lifetime, with HTTP429 `inference_busy` for a competing request. A validated request changing the session identity clears all inactive private/shared Engine checkpoints, then lazily restores a compatible disk snapshot for the requested session before submission. `X-NInfer-Session` selects that identity; Chat/Anthropic without the header derive it from the initial user turn, while Responses retains its response-chain identity. Terminal requests automatically save the stable Engine catalog before the generation slot is released. These Windows rules override the general multi-request ingress behavior below. Read-only UI/model/token-count calls do not clear or claim a generation cache session.
 
-Windows localhost UI controls require the configured API key and `X-NInfer-Control: 1`: `POST /ui/cache/clear` clears inactive checkpoints only when idle (200; 409 when busy), and `POST /ui/shutdown` returns202 then cancels generation and closes the service. Runtime token totals stay cumulative across cache clearing. The UI snapshot adds `context_session` with `mode`, `busy`, `owner` (`web`/`api`/`none`), and `switch_count`; no prompt, session key or output text is published.
+Windows localhost UI controls require the configured API key and `X-NInfer-Control: 1`: `POST /ui/cache/clear` clears inactive Engine checkpoints and every disk session snapshot only when idle (200; 409 when busy), and `POST /ui/shutdown` returns202 then cancels generation and closes the service. Runtime token totals stay cumulative across cache clearing. The UI snapshot adds `context_session` with `mode`, `busy`, `owner` (`web`/`api`/`none`), and `switch_count`, plus the bounded non-sensitive `disk_cache` status described above; no prompt, session key, response text or full artifact path is published.
+
+Cancellation can leave a stable server checkpoint ahead of the text received by the client. If the
+client replays only its visible partial answer, that checkpoint is not an exact match: Engine must
+select an earlier matching checkpoint and recompute the intervening suffix. Disk persistence does
+not make every arbitrary output truncation a fully reusable continuation.
 
 The server owns one resident Engine with a startup-fixed capacity of `1..8` active generation
 requests. At each decode boundary, every decode-ready request is compacted into one batch and
