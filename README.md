@@ -12,6 +12,7 @@
 - **输入：文本、工具历史与可选图像。** 服务提供 OpenAI Chat Completions / Responses、Anthropic Messages 和流式输出。Windows 通过 `-Vision` 接受 JPEG、PNG、BMP 图片；网页提供上传与预览，视频输入不支持。
 - **网页：** 多轮聊天、思考折叠、停止生成、完整模型标识、decode tok/s、首字延迟和缓存命中；全局速度面板同时监控其它平台的 API 生成调用。
 - **KV：** BF16 / INT8 / FP8；默认 BF16。MTP 默认 learned window 6、optimized proposal head，前缀复用默认开启。
+- **思考：** 默认启用模型原生思考；网页默认勾选，API 未指定挡位时沿用模型模板默认 `xhigh`，不单独限制思考 token 数。请求可显式关闭或选择模型支持的挡位。
 
 此程序加载显式注册的 `.ninfer` artifact。GGUF 和任意 Q2/Q3/Q4/Q5/Q6 文件不能直接使用；其它模型的上游注册情况不等于本 Windows 发行版已经测过。
 
