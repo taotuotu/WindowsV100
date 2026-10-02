@@ -44,7 +44,7 @@ std::vector<std::uint16_t> bf16_bits(const std::vector<float>& values) {
 void packed_attention_oracle(const std::vector<float>& q, const std::vector<float>& k,
                              const std::vector<float>& v, const std::vector<int>& cu_seqlens,
                              std::vector<double>& out) {
-    constexpr double scale = 1.0 / std::sqrt(72.0);
+    const double scale = 1.0 / std::sqrt(72.0);
     out.assign(q.size(), 0.0);
 
     for (std::size_t segment = 0; segment + 1 < cu_seqlens.size(); ++segment) {
@@ -72,6 +72,35 @@ enum class StorageProfile {
     Contiguous,
     InterleavedQkv,
 };
+
+void sampled_attention_oracle(const std::vector<float>& q, const std::vector<float>& k,
+                              const std::vector<float>& v, const std::vector<int>& boundaries,
+                              std::vector<std::size_t>& indices, std::vector<double>& reference) {
+    const double scale = 1.0 / std::sqrt(72.0);
+    for (std::size_t segment = 0; segment + 1 < boundaries.size(); ++segment) {
+        const int begin = boundaries[segment];
+        const int length = boundaries[segment + 1] - begin;
+        std::vector<int> queries{0, 31, 32, 127, 128, 255, 256, length / 2, length - 2, length - 1};
+        std::erase_if(queries, [length](int i) { return i < 0 || i >= length; });
+        std::sort(queries.begin(), queries.end());
+        queries.erase(std::unique(queries.begin(), queries.end()), queries.end());
+        const std::size_t offset = reference.size();
+        const std::size_t count = queries.size() * kHeads * kDim;
+        reference.resize(offset + count);
+        indices.resize(offset + count);
+        naive_dense_softmax_attention(
+            kGeometry, static_cast<int>(queries.size()), length, scale,
+            [&](int d, int h, int t) { return static_cast<double>(q[index_of(begin + queries[t], h, d)]); },
+            [&](int d, int h, int t) { return static_cast<double>(k[index_of(begin + t, h, d)]); },
+            [&](int d, int h, int t) { return static_cast<double>(v[index_of(begin + t, h, d)]); },
+            [](int, int) { return true; },
+            [&](int d, int h, int t, double value) {
+                const std::size_t at = offset + index_of(t, h, d);
+                reference[at] = value;
+                indices[at] = index_of(begin + queries[t], h, d);
+            });
+    }
+}
 
 enum class PublicEntry {
     Plain,
@@ -101,7 +130,8 @@ const char* entry_name(PublicEntry entry) {
 }
 
 int run_case(const std::vector<int>& cu_seqlens, std::uint32_t seed, StorageProfile storage_profile,
-             PublicEntry entry, InputProfile input_profile = InputProfile::Random) {
+             PublicEntry entry, InputProfile input_profile = InputProfile::Random,
+             bool sampled = false) {
     const int tokens              = cu_seqlens.back();
     const std::size_t token_plane = static_cast<std::size_t>(kHeads) * kDim;
     const std::size_t value_count = static_cast<std::size_t>(tokens) * token_plane;
@@ -127,7 +157,12 @@ int run_case(const std::vector<int>& cu_seqlens, std::uint32_t seed, StorageProf
     round_to_bf16(v);
 
     std::vector<double> reference;
-    packed_attention_oracle(q, k, v, cu_seqlens, reference);
+    std::vector<std::size_t> sample_indices;
+    if (sampled) {
+        sampled_attention_oracle(q, k, v, cu_seqlens, sample_indices, reference);
+    } else {
+        packed_attention_oracle(q, k, v, cu_seqlens, reference);
+    }
 
     const auto q_expected = bf16_bits(q);
     const auto k_expected = bf16_bits(k);
@@ -200,7 +235,7 @@ int run_case(const std::vector<int>& cu_seqlens, std::uint32_t seed, StorageProf
             }
         }
         ops::packed_softmax_attention(q_tensor, k_tensor, v_tensor, kGeometry, kScale,
-                                      segment_length, out_tensor, nullptr);
+                                      segment_length, workspace, out_tensor, nullptr);
     }
     cuda_synchronize();
 
@@ -209,9 +244,14 @@ int run_case(const std::vector<int>& cu_seqlens, std::uint32_t seed, StorageProf
                               storage_name(storage_profile) + " " + entry_name(entry);
     const std::string qualified_label =
         input_profile == InputProfile::SegmentIsolation ? label + " segment-isolation" : label;
-    int failures =
-        verify_reduction(qualified_label.c_str(), from_device_bf16(d_out.data(), value_count),
-                         reference, kPackedAttentionBf16Criterion);
+    const auto all_output = from_device_bf16(d_out.data(), value_count);
+    std::vector<double> selected_output;
+    if (sampled) {
+        selected_output.reserve(sample_indices.size());
+        for (const auto index : sample_indices) { selected_output.push_back(all_output[index]); }
+    }
+    int failures = verify_reduction(qualified_label.c_str(), sampled ? selected_output : all_output,
+                                     reference, kPackedAttentionBf16Criterion);
     failures += d_out.verify_guards((qualified_label + " output guards").c_str());
     if (storage_profile == StorageProfile::Contiguous) {
         failures += verify_exact((qualified_label + " q unchanged").c_str(),
@@ -268,6 +308,12 @@ int run_softmax_attention_plain_and_packed_tests() {
         run_case({0, 68, 136}, 101u, StorageProfile::InterleavedQkv, PublicEntry::UniformSegments);
     failures +=
         run_case({0, 256}, 2026u, StorageProfile::InterleavedQkv, PublicEntry::CuSeqlensArena);
+    for (const int tokens : {1024, 1025, 4800, 16384}) {
+        failures += run_case({0, tokens}, 7026u + tokens, StorageProfile::InterleavedQkv,
+                             PublicEntry::UniformSegments, InputProfile::Random, true);
+    }
+    failures += run_case({0, 1024, 2048}, 17026u, StorageProfile::InterleavedQkv,
+                         PublicEntry::UniformSegments, InputProfile::SegmentIsolation, true);
 
     if (failures != 0) {
         std::cerr << "packed_softmax_attention failures=" << failures << '\n';

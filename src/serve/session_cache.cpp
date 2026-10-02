@@ -21,6 +21,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -37,6 +38,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -71,6 +73,9 @@ constexpr std::size_t kHeadPrefixBytes = 8U + sizeof(std::uint32_t) + Digest{}.s
 constexpr std::size_t kHeadFileBytes = kHeadPrefixBytes + Digest{}.size();
 constexpr std::size_t kIoBufferBytes = 1U << 20;
 constexpr std::uint64_t kCommitReserveBytes = kSnapshotFooterBytes + kHeadFileBytes;
+constexpr std::uint64_t kMaximumSnapshotArchiveBytes =
+    ninfer::kDefaultMaximumContextCacheSnapshotBytes;
+constexpr std::uint64_t kMaximumQueuedSnapshotBytes = 32ULL << 30;
 constexpr std::uint64_t kMaxIdentityStringBytes = 1024;
 
 class StoreError final : public std::runtime_error {
@@ -331,9 +336,18 @@ void require_json_members(const Json& value, std::initializer_list<std::string_v
     return result;
 }
 
+[[nodiscard]] std::wstring extended_windows_path(const std::filesystem::path& path) {
+    const std::wstring native =
+        std::filesystem::absolute(path).lexically_normal().make_preferred().native();
+    if (native.starts_with(L"\\\\?\\")) { return native; }
+    if (native.starts_with(L"\\\\")) { return L"\\\\?\\UNC\\" + native.substr(2); }
+    return L"\\\\?\\" + native;
+}
+
 [[nodiscard]] FileHandle open_file(const std::filesystem::path& path, DWORD access, DWORD share,
                                   DWORD disposition, DWORD flags = FILE_ATTRIBUTE_NORMAL) {
-    HANDLE handle = ::CreateFileW(path.c_str(), access, share, nullptr, disposition, flags, nullptr);
+    const std::wstring native = extended_windows_path(path);
+    HANDLE handle = ::CreateFileW(native.c_str(), access, share, nullptr, disposition, flags, nullptr);
     if (handle == INVALID_HANDLE_VALUE) { throw StoreError(StoreError::Kind::Io, "session cache file open failed"); }
     return FileHandle(handle);
 }
@@ -386,7 +400,8 @@ void flush_file(HANDLE handle) {
 }
 
 void atomic_replace(const std::filesystem::path& source, const std::filesystem::path& destination) {
-    if (!::MoveFileExW(source.c_str(), destination.c_str(),
+    if (!::MoveFileExW(extended_windows_path(source).c_str(),
+                       extended_windows_path(destination).c_str(),
                        MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
         throw StoreError(StoreError::Kind::Io, "session cache atomic replace failed");
     }
@@ -749,6 +764,16 @@ public:
             });
             throw;
         }
+        worker_ = std::thread([this] { save_worker_loop(); });
+    }
+
+    ~Impl() {
+        {
+            std::lock_guard lock(queue_mutex_);
+            stopping_ = true;
+        }
+        queue_cv_.notify_all();
+        if (worker_.joinable()) { worker_.join(); }
     }
 
     [[nodiscard]] SessionCacheStoreStats snapshot_stats() const {
@@ -756,74 +781,134 @@ public:
         return stats_;
     }
 
-    [[nodiscard]] bool save(ninfer::Engine& engine, std::string_view session) {
-        if (!stats_.enabled) { set_error("disabled"); return false; }
+    [[nodiscard]] SessionCacheCaptureResult capture_and_enqueue(
+        ninfer::Engine& engine, std::string_view session,
+        std::function<void(std::string_view)> failure_observer) {
+        if (!stats_.enabled) { set_error("disabled"); return SessionCacheCaptureResult::Skipped; }
         validate_session(session);
-        std::unique_lock operation_lock(operation_mutex_);
-        set_operation("saving");
+
+        std::uint64_t capture_limit = 0;
+        std::uint64_t capture_epoch = 0;
+        std::string admission_failure;
+        {
+            std::lock_guard lock(queue_mutex_);
+            if (stopping_) {
+                admission_failure = "cancelled";
+            } else if (capture_in_progress_) {
+                throw std::logic_error("session cache snapshot capture is already active");
+            } else if (pending_job_ && pending_job_->session != session) {
+                admission_failure = "queue_full";
+            } else {
+                const std::uint64_t occupied_bytes = active_bytes_ + pending_bytes_;
+                const std::uint64_t available_bytes =
+                    occupied_bytes < kMaximumQueuedSnapshotBytes
+                        ? kMaximumQueuedSnapshotBytes - occupied_bytes
+                        : 0;
+                capture_limit = std::min(kMaximumSnapshotArchiveBytes, available_bytes);
+                if (capture_limit == 0) { admission_failure = "budget_exceeded"; }
+            }
+            if (!admission_failure.empty()) {
+                update_stats([&](SessionCacheStoreStats& stats) {
+                    stats.last_error_code = admission_failure;
+                    ++stats.failures;
+                });
+                publish_queue_stats_locked();
+            } else {
+                capture_in_progress_ = true;
+                capture_session_ = session;
+                capture_reserved_bytes_ = capture_limit;
+                capture_epoch = epoch_;
+                publish_queue_stats_locked();
+            }
+        }
+        if (!admission_failure.empty()) {
+            if (failure_observer) {
+                const std::string detail = admission_failure == "queue_full"
+                                               ? "session cache save queue is occupied by another session"
+                                               : "session cache snapshot memory budget is exhausted";
+                try { failure_observer(detail); } catch (...) {}
+            }
+            return SessionCacheCaptureResult::Skipped;
+        }
+
+        const auto capture_started = std::chrono::steady_clock::now();
+        ninfer::ContextCacheSnapshot snapshot;
         try {
-            const std::string base = make_base(session);
-            cleanup_orphans_locked();
-            refresh_disk_stats_locked();
-            auto head = read_head(base);
-            const std::uint64_t generation = next_generation(head);
-            const std::string final_name = snapshot_name(base, generation);
-            const std::filesystem::path final_path = child_path(final_name);
-            const std::filesystem::path temporary_path = child_path(temporary_name(final_name));
-
-            ensure_room(kSnapshotHeaderBytes + kCommitReserveBytes, base);
-            SnapshotFileWriter writer(*this, base, temporary_path, generation,
-                                      session_digest(session));
-            const ninfer::ContextCacheSnapshotStats saved = engine.save_context_cache(writer);
-            // A shared-only catalog is valid as an Engine archive, but without an Engine
-            // SessionIndex binding it cannot resume this session. Keep the previous head.
-            if (saved.checkpoints == 0 || saved.session_continuations == 0) {
-                writer.discard();
-                refresh_disk_stats_locked();
-                finish_operation("no_checkpoint", false, false, 0, 0);
-                return false;
-            }
-            if (saved.bytes != writer.archive_bytes()) {
-                throw std::runtime_error("Engine session cache archive length mismatch");
-            }
-            writer.complete(saved);
-            writer.close();
-            atomic_replace(temporary_path, final_path);
-
-            HeadRecord next;
-            next.namespace_digest = namespace_digest_;
-            next.session_digest = session_digest(session);
-            next.current_generation = generation;
-            next.previous_generation = head ? head->current_generation : 0;
-            next.last_access_ms = utc_milliseconds();
-
-            // The prior two generations remain intact until the new archive itself is complete.
-            // Eviction is limited to other sessions; the target's old head stays recoverable until
-            // its replacement commits atomically.
-            ensure_session_slot(base);
-            write_head_atomic(base, next);
-
-            if (head && head->previous_generation != 0) {
-                (void)delete_file_accounted(snapshot_name(base, head->previous_generation));
-            }
-            cleanup_orphans_best_effort();
-            refresh_disk_stats_best_effort();
-            finish_operation("none", true, false,
-                             kSnapshotHeaderBytes + saved.bytes + kSnapshotFooterBytes, 0);
-            return true;
-        } catch (const StoreError& error) {
-            const bool budget = error.kind() == StoreError::Kind::Budget;
-            cleanup_orphans_best_effort();
-            refresh_disk_stats_best_effort();
-            finish_operation(budget ? "budget_exceeded" : "io_error", false, true, 0, 0);
-            if (budget) { return false; }
-            throw;
+            snapshot = engine.capture_context_cache(capture_limit);
         } catch (...) {
-            cleanup_orphans_best_effort();
-            refresh_disk_stats_best_effort();
-            finish_operation("engine_error", false, true, 0, 0);
+            const double capture_seconds = elapsed_seconds(capture_started);
+            finish_capture_failure(capture_seconds, exception_status(std::current_exception()));
             throw;
         }
+        const double capture_seconds = elapsed_seconds(capture_started);
+        const ninfer::ContextCacheSnapshotStats snapshot_stats = snapshot.stats();
+        const std::uint64_t allocated_bytes = snapshot.allocated_bytes();
+        if (!snapshot || snapshot_stats.bytes > capture_limit || allocated_bytes > capture_limit) {
+            finish_capture_failure(capture_seconds, "budget_exceeded");
+            if (failure_observer) {
+                try { failure_observer("captured session snapshot exceeded its reserved memory budget"); }
+                catch (...) {}
+            }
+            return SessionCacheCaptureResult::Skipped;
+        }
+        if (snapshot_stats.checkpoints == 0 || snapshot_stats.session_continuations == 0) {
+            finish_empty_capture(capture_seconds);
+            return SessionCacheCaptureResult::NoCheckpoint;
+        }
+
+        std::optional<SaveJob> replacement;
+        try {
+            replacement.emplace(SaveJob{.session = std::string(session),
+                                        .snapshot = std::move(snapshot),
+                                        .failure_observer = std::move(failure_observer),
+                                        .capture_seconds = capture_seconds,
+                                        .bytes = allocated_bytes,
+                                        .epoch = capture_epoch});
+        } catch (...) {
+            finish_capture_failure(capture_seconds, "engine_error");
+            throw;
+        }
+
+        std::string enqueue_failure;
+        {
+            std::lock_guard lock(queue_mutex_);
+            capture_in_progress_ = false;
+            capture_session_ = {};
+            capture_reserved_bytes_ = 0;
+            if (epoch_ != capture_epoch) {
+                enqueue_failure = "cancelled";
+            } else if (pending_job_ && pending_job_->session != session) {
+                enqueue_failure = "queue_full";
+            } else if (allocated_bytes > kMaximumQueuedSnapshotBytes - active_bytes_ - pending_bytes_) {
+                enqueue_failure = "budget_exceeded";
+            } else {
+                if (pending_job_) {
+                    ++coalesced_snapshots_;
+                }
+                pending_job_ = std::move(replacement);
+                pending_bytes_ = allocated_bytes;
+                update_capture_stats_locked(capture_seconds, "none", false);
+            }
+            if (!enqueue_failure.empty()) {
+                ++cancelled_snapshots_;
+                update_capture_stats_locked(capture_seconds, enqueue_failure, true);
+            }
+            publish_queue_stats_locked();
+        }
+        if (!enqueue_failure.empty()) {
+            if (replacement && replacement->failure_observer) {
+                const std::string detail = enqueue_failure == "queue_full"
+                                               ? "session cache save queue changed during capture"
+                                           : enqueue_failure == "cancelled"
+                                               ? "session cache capture was invalidated by clear"
+                                               : "session cache snapshot memory budget is exhausted";
+                try { replacement->failure_observer(detail); } catch (...) {}
+            }
+            return SessionCacheCaptureResult::Skipped;
+        }
+        queue_cv_.notify_one();
+        queue_cv_.notify_all();
+        return SessionCacheCaptureResult::Queued;
     }
 
     [[nodiscard]] bool restore(ninfer::Engine& engine, std::string_view session,
@@ -831,6 +916,12 @@ public:
                                bool replace_in_memory) {
         if (!stats_.enabled) { set_error("disabled"); return false; }
         validate_session(session);
+        try {
+            wait_for_session_saves(session, checkpoint);
+        } catch (const RestoreInterrupted& interrupted) {
+            finish_operation("cancelled", false, false, 0, 0);
+            interrupted.rethrow_original();
+        }
         std::unique_lock operation_lock(operation_mutex_);
         set_operation("restoring");
         std::string last_error = "miss";
@@ -927,6 +1018,17 @@ public:
 
     void clear() {
         if (!stats_.enabled) { set_error("disabled"); return; }
+        {
+            std::lock_guard lock(queue_mutex_);
+            ++epoch_;
+            if (pending_job_) {
+                pending_job_.reset();
+                pending_bytes_ = 0;
+                ++cancelled_snapshots_;
+            }
+            publish_queue_stats_locked();
+        }
+        queue_cv_.notify_all();
         std::unique_lock operation_lock(operation_mutex_);
         set_operation("clearing");
         try {
@@ -960,6 +1062,232 @@ public:
     }
 
 private:
+    struct SaveJob {
+        std::string session;
+        ninfer::ContextCacheSnapshot snapshot;
+        std::function<void(std::string_view)> failure_observer;
+        double capture_seconds = 0.0;
+        std::uint64_t bytes = 0;
+        std::uint64_t epoch = 0;
+    };
+
+    [[nodiscard]] static double elapsed_seconds(std::chrono::steady_clock::time_point start) {
+        return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    }
+
+    [[nodiscard]] static std::string exception_status(std::exception_ptr error) {
+        try {
+            if (error) { std::rethrow_exception(error); }
+        } catch (const ninfer::ContextCacheBudgetExceeded&) {
+            return "budget_exceeded";
+        } catch (const StoreError& store_error) {
+            return store_error.kind() == StoreError::Kind::Budget ? "budget_exceeded" : "io_error";
+        } catch (const std::exception&) {
+            return "engine_error";
+        } catch (...) {
+            return "engine_error";
+        }
+        return "engine_error";
+    }
+
+    [[nodiscard]] static std::string exception_detail(std::exception_ptr error) {
+        try {
+            if (error) { std::rethrow_exception(error); }
+        } catch (const std::exception& exception) {
+            return exception.what();
+        } catch (...) {
+            return "unknown context cache persistence error";
+        }
+        return "unknown context cache persistence error";
+    }
+
+    void publish_queue_stats_locked() {
+        update_stats([&](SessionCacheStoreStats& stats) {
+            stats.queued_snapshots = static_cast<std::uint32_t>(
+                (active_bytes_ != 0 ? 1U : 0U) + (pending_job_ ? 1U : 0U));
+            stats.queued_snapshot_bytes = active_bytes_ + pending_bytes_;
+            stats.capture_reserved_bytes = capture_reserved_bytes_;
+            stats.capture_in_progress = capture_in_progress_;
+            stats.coalesced_snapshots = coalesced_snapshots_;
+            stats.cancelled_snapshots = cancelled_snapshots_;
+            if (!exclusive_operation_.empty()) {
+                stats.operation = exclusive_operation_;
+            } else if (capture_in_progress_) {
+                stats.operation = "capturing";
+            } else if (active_bytes_ != 0 || pending_job_) {
+                stats.operation = "saving";
+            } else {
+                stats.operation = "idle";
+            }
+        });
+    }
+
+    void update_capture_stats_locked(double capture_seconds, std::string error, bool failed) {
+        update_stats([&](SessionCacheStoreStats& stats) {
+            stats.last_capture_seconds = capture_seconds;
+            stats.last_error_code = std::move(error);
+            if (failed) { ++stats.failures; }
+        });
+    }
+
+    void finish_capture_failure(double capture_seconds, std::string error) {
+        std::lock_guard lock(queue_mutex_);
+        capture_in_progress_ = false;
+        capture_session_ = {};
+        capture_reserved_bytes_ = 0;
+        update_capture_stats_locked(capture_seconds, std::move(error), true);
+        publish_queue_stats_locked();
+        queue_cv_.notify_all();
+    }
+
+    void finish_empty_capture(double capture_seconds) {
+        std::lock_guard lock(queue_mutex_);
+        capture_in_progress_ = false;
+        capture_session_ = {};
+        capture_reserved_bytes_ = 0;
+        update_capture_stats_locked(capture_seconds, "no_checkpoint", false);
+        publish_queue_stats_locked();
+        queue_cv_.notify_all();
+    }
+
+    [[nodiscard]] bool job_is_current(std::uint64_t epoch) {
+        std::lock_guard lock(queue_mutex_);
+        return epoch == epoch_;
+    }
+
+    [[nodiscard]] bool session_save_pending_locked(std::string_view session) const {
+        return (active_bytes_ != 0 && active_session_ == session) ||
+               (pending_job_ && pending_job_->session == session) ||
+               (capture_in_progress_ && capture_session_ == session);
+    }
+
+    void wait_for_session_saves(std::string_view session,
+                                const std::function<void()>& checkpoint) {
+        std::unique_lock lock(queue_mutex_);
+        while (session_save_pending_locked(session)) {
+            lock.unlock();
+            invoke_checkpoint(checkpoint);
+            lock.lock();
+            if (!session_save_pending_locked(session)) { break; }
+            queue_cv_.wait_for(lock, std::chrono::milliseconds(25));
+        }
+    }
+
+    void save_worker_loop() noexcept {
+        for (;;) {
+            std::optional<SaveJob> job;
+            {
+                std::unique_lock lock(queue_mutex_);
+                queue_cv_.wait(lock, [&] { return stopping_ || pending_job_.has_value(); });
+                if (!pending_job_) {
+                    if (stopping_) { return; }
+                    continue;
+                }
+                job.emplace(std::move(*pending_job_));
+                pending_job_.reset();
+                pending_bytes_ = 0;
+                active_bytes_ = job->bytes;
+                active_session_ = job->session;
+                publish_queue_stats_locked();
+            }
+
+            double write_seconds = 0.0;
+            std::exception_ptr failure;
+            std::unique_lock operation_lock(operation_mutex_);
+            const auto write_started = std::chrono::steady_clock::now();
+            bool attempted_write = false;
+            try {
+                if (job_is_current(job->epoch)) {
+                    attempted_write = true;
+                    (void)save_snapshot(*job);
+                } else {
+                    {
+                        std::lock_guard lock(queue_mutex_);
+                        ++cancelled_snapshots_;
+                    }
+                    finish_operation("cancelled", false, false, 0, 0);
+                }
+            } catch (...) {
+                failure = std::current_exception();
+                finish_operation(exception_status(failure), false, true, 0, 0);
+                cleanup_orphans_best_effort();
+                refresh_disk_stats_best_effort();
+            }
+            if (attempted_write) { write_seconds = elapsed_seconds(write_started); }
+            operation_lock.unlock();
+            job->snapshot = ninfer::ContextCacheSnapshot{};
+            {
+                std::lock_guard lock(queue_mutex_);
+                active_bytes_ = 0;
+                active_session_ = {};
+                update_stats([&](SessionCacheStoreStats& stats) {
+                    stats.last_write_seconds = write_seconds;
+                    if (failure != nullptr) { stats.last_error_code = exception_status(failure); }
+                });
+                publish_queue_stats_locked();
+            }
+            queue_cv_.notify_all();
+            if (failure != nullptr && job->failure_observer) {
+                try { job->failure_observer(exception_detail(failure)); } catch (...) {}
+            }
+        }
+    }
+
+    [[nodiscard]] bool save_snapshot(const SaveJob& job) {
+        const std::string base = make_base(job.session);
+        cleanup_orphans_locked();
+        refresh_disk_stats_locked();
+        auto head = read_head(base);
+        const std::uint64_t generation = next_generation(head);
+        const std::string final_name = snapshot_name(base, generation);
+        const std::filesystem::path final_path = child_path(final_name);
+        const std::filesystem::path temporary_path = child_path(temporary_name(final_name));
+
+        ensure_room(kSnapshotHeaderBytes + kCommitReserveBytes, base);
+        SnapshotFileWriter writer(*this, base, temporary_path, generation,
+                                  session_digest(job.session));
+        const ninfer::ContextCacheSnapshotStats& saved = job.snapshot.stats();
+        job.snapshot.write_to(writer);
+        if (saved.bytes != writer.archive_bytes()) {
+            throw std::runtime_error("Engine session cache archive length mismatch");
+        }
+        writer.complete(saved);
+        writer.close();
+        atomic_replace(temporary_path, final_path);
+        if (!job_is_current(job.epoch)) {
+            cleanup_orphans_best_effort();
+            refresh_disk_stats_best_effort();
+            {
+                std::lock_guard lock(queue_mutex_);
+                ++cancelled_snapshots_;
+            }
+            finish_operation("cancelled", false, false, 0, 0);
+            return false;
+        }
+
+        HeadRecord next;
+        next.namespace_digest = namespace_digest_;
+        next.session_digest = session_digest(job.session);
+        next.current_generation = generation;
+        next.previous_generation = head ? head->current_generation : 0;
+        next.last_access_ms = utc_milliseconds();
+
+        // Keep the previous committed generation available until the replacement is complete.
+        // A cache clear advances the epoch before taking operation_mutex_; if it races this commit,
+        // it will subsequently remove the just-committed head as part of the same barrier.
+        ensure_session_slot(base);
+        write_head_atomic(base, next);
+
+        if (head && head->previous_generation != 0) {
+            (void)delete_file_accounted(snapshot_name(base, head->previous_generation));
+        }
+        cleanup_orphans_best_effort();
+        refresh_disk_stats_best_effort();
+        finish_operation("none", true, false,
+                         kSnapshotHeaderBytes + saved.bytes + kSnapshotFooterBytes, 0);
+        return true;
+    }
+
     class SnapshotFileWriter final : public ninfer::ContextCacheWriter {
     public:
         SnapshotFileWriter(Impl& owner, std::string base, std::filesystem::path temporary_path,
@@ -1155,7 +1483,7 @@ private:
 
     [[nodiscard]] std::optional<HeadRecord> read_head(std::string_view base) const {
         const std::filesystem::path path = head_path(base);
-        const DWORD attributes = ::GetFileAttributesW(path.c_str());
+        const DWORD attributes = ::GetFileAttributesW(extended_windows_path(path).c_str());
         if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0 ||
             (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
             return std::nullopt;
@@ -1185,7 +1513,7 @@ private:
              it.increment(error)) {
             const std::string name = path_filename_utf8(it->path());
             if (!is_owned_filename(name)) { continue; }
-            const DWORD attributes = ::GetFileAttributesW(it->path().c_str());
+            const DWORD attributes = ::GetFileAttributesW(extended_windows_path(it->path()).c_str());
             if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0 ||
                 (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
                 continue;
@@ -1198,7 +1526,7 @@ private:
 
     [[nodiscard]] std::uint64_t named_file_size(std::string_view name) const {
         const std::filesystem::path path = child_path(name);
-        const DWORD attributes = ::GetFileAttributesW(path.c_str());
+        const DWORD attributes = ::GetFileAttributesW(extended_windows_path(path).c_str());
         if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0 ||
             (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
             return 0;
@@ -1247,7 +1575,9 @@ private:
     }
 
     void set_operation(std::string operation) {
-        update_stats([&](SessionCacheStoreStats& stats) { stats.operation = std::move(operation); });
+        std::lock_guard lock(queue_mutex_);
+        exclusive_operation_ = std::move(operation);
+        publish_queue_stats_locked();
     }
 
     void set_error(std::string error) {
@@ -1263,8 +1593,9 @@ private:
 
     void finish_operation(std::string error, bool saved, bool failed,
                           std::uint64_t saved_bytes, std::uint64_t restored_bytes) {
+        std::lock_guard queue_lock(queue_mutex_);
+        exclusive_operation_.clear();
         update_stats([&](SessionCacheStoreStats& stats) {
-            stats.operation = "idle";
             stats.last_error_code = std::move(error);
             if (saved) { ++stats.saves; }
             if (restored_bytes != 0) { ++stats.restores; }
@@ -1273,6 +1604,7 @@ private:
             if (saved) { stats.last_saved_bytes = saved_bytes; }
             if (restored_bytes != 0) { stats.last_restored_bytes = restored_bytes; }
         });
+        publish_queue_stats_locked();
     }
 
     [[nodiscard]] std::uint64_t next_generation(const std::optional<HeadRecord>& head) const {
@@ -1367,7 +1699,7 @@ private:
         const std::filesystem::path resolved_parent =
             std::filesystem::weakly_canonical(path.parent_path(), canonical_error);
         if (canonical_error || resolved_parent != root_) { return false; }
-        const DWORD attributes = ::GetFileAttributesW(path.c_str());
+        const DWORD attributes = ::GetFileAttributesW(extended_windows_path(path).c_str());
         if (attributes == INVALID_FILE_ATTRIBUTES) {
             const DWORD error = ::GetLastError();
             return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
@@ -1378,7 +1710,7 @@ private:
         }
         std::uint64_t size = 0;
         try { size = named_file_size(name); } catch (...) { return false; }
-        if (!::DeleteFileW(path.c_str())) {
+        if (!::DeleteFileW(extended_windows_path(path).c_str())) {
             const DWORD error = ::GetLastError();
             return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
         }
@@ -1516,6 +1848,23 @@ private:
     mutable std::mutex stats_mutex_;
     mutable SessionCacheStoreStats stats_;
     std::mutex operation_mutex_;
+    std::mutex queue_mutex_;
+    std::condition_variable queue_cv_;
+    std::thread worker_;
+    std::optional<SaveJob> pending_job_;
+    bool stopping_ = false;
+    bool capture_in_progress_ = false;
+    // The capture caller owns its session through the call; the worker's SaveJob owns the active
+    // session through the write. These views avoid allocation in the noexcept writer loop.
+    std::string_view capture_session_;
+    std::string_view active_session_;
+    std::uint64_t active_bytes_ = 0;
+    std::uint64_t pending_bytes_ = 0;
+    std::uint64_t capture_reserved_bytes_ = 0;
+    std::uint64_t coalesced_snapshots_ = 0;
+    std::uint64_t cancelled_snapshots_ = 0;
+    std::uint64_t epoch_ = 0;
+    std::string exclusive_operation_;
     SessionCacheStoreOptions options_;
     SessionCacheIdentity identity_;
     std::filesystem::path root_;
@@ -1532,9 +1881,11 @@ SessionCacheStore::~SessionCacheStore() = default;
 SessionCacheStore::SessionCacheStore(SessionCacheStore&&) noexcept = default;
 SessionCacheStore& SessionCacheStore::operator=(SessionCacheStore&&) noexcept = default;
 
-bool SessionCacheStore::save(ninfer::Engine& engine, std::string_view session) {
-    if (!impl_) { return false; }
-    return impl_->save(engine, session);
+SessionCacheCaptureResult SessionCacheStore::capture_and_enqueue(
+    ninfer::Engine& engine, std::string_view session,
+    std::function<void(std::string_view)> failure_observer) {
+    if (!impl_) { return SessionCacheCaptureResult::Skipped; }
+    return impl_->capture_and_enqueue(engine, session, std::move(failure_observer));
 }
 
 bool SessionCacheStore::restore(ninfer::Engine& engine, std::string_view session,

@@ -295,6 +295,19 @@ int exercise_layout_and_transfer(ninfer::DeviceContext& context, ninfer::KVPageG
     failures += expect(std::memcmp(host_view.data(), expected.data(), expected.size()) == 0,
                        label + " D2H canonical page records differ from Device payload");
 
+    ninfer::PinnedHostBuffer raw_snapshot(expected.size());
+    std::span<std::byte> raw_payload(static_cast<std::byte*>(raw_snapshot.data()), expected.size());
+    std::fill(raw_payload.begin(), raw_payload.end(), std::byte{0});
+    source.copy_to_host(source_handles, raw_payload, context.stream);
+    context.synchronize();
+    failures += expect(std::memcmp(raw_payload.data(), expected.data(), expected.size()) == 0,
+                       label + " transient batched D2H records differ from Device payload");
+    bool short_snapshot_rejected = false;
+    try {
+        source.copy_to_host(source_handles, raw_payload.first(raw_payload.size() - 1), context.stream);
+    } catch (const std::invalid_argument&) { short_snapshot_rejected = true; }
+    failures += expect(short_snapshot_rejected, label + " short transient D2H extent was accepted");
+
     std::vector<ninfer::DeviceKVPageLease> restored                = materialize(destination, 5);
     const std::vector<ninfer::DeviceKVPageHandle> restored_handles = handles(restored);
     destination.zero_pages(restored_handles, context.stream);

@@ -565,10 +565,12 @@ GenerationOutcome GenerationService::run(PreparedRequest& prepared, const Stream
     const auto save_terminal_cache = [&] {
         if (!disk_cache_ || !prepared.cache_session) { return; }
         // wait() also settles the Engine's terminal state before rethrowing a stream consumer
-        // exception. Save in that path too: a disconnected socket must not bypass persistence.
+        // exception. Freeze and enqueue in that path too: a disconnected socket must not bypass
+        // persistence, while the background writer remains independent of the HTTP stream.
         try {
-            const bool saved = disk_cache_->save(*engine_, *prepared.cache_session);
-            if (!saved && disk_cache_->snapshot_stats().last_error_code == "no_checkpoint" &&
+            const SessionCacheCaptureResult captured = disk_cache_->capture_and_enqueue(
+                *engine_, *prepared.cache_session, cache_failure_observer_);
+            if (captured == SessionCacheCaptureResult::NoCheckpoint &&
                 engine_->is_available()) {
                 // An unsafe provisional cancellation may have consumed the in-memory endpoint.
                 // Restore the previous complete session snapshot now, so a same-owner next turn
@@ -590,11 +592,13 @@ GenerationOutcome GenerationService::run(PreparedRequest& prepared, const Stream
     } catch (const ninfer::RequestError& exception) {
 #if defined(NINFER_WINDOWS_SERVE)
         save_terminal_cache();
+        prepared.lifetime.reset();
 #endif
         throw_request_error(exception);
     } catch (...) {
 #if defined(NINFER_WINDOWS_SERVE)
         save_terminal_cache();
+        prepared.lifetime.reset();
 #endif
         throw;
     }
@@ -636,8 +640,10 @@ GenerationOutcome GenerationService::run(PreparedRequest& prepared, const Stream
     outcome.tool_calls      = std::move(result.tool_calls);
     outcome.tool_call_parse = result.tool_call_parse;
 #if defined(NINFER_WINDOWS_SERVE)
-    // The HTTP reservation remains held during the commit; client cancellation must not cancel it.
+    // Keep the request slot through stable capture. Background disk commit owns only host bytes;
+    // release the slot before the terminal HTTP frame so the next turn can use the RAM cache.
     save_terminal_cache();
+    prepared.lifetime.reset();
 #endif
     return outcome;
 }

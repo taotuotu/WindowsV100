@@ -90,7 +90,15 @@ std::size_t packed_softmax_attention_workspace_capacity_bytes(AttentionHeadGeome
     const std::int32_t segments = std::min(max_segments, max_tokens);
     WorkspaceLayoutBuilder layout;
     (void)allocate_workspace(layout, max_tokens, segments);
-    return layout.peak_bytes(1);
+    std::size_t capacity = layout.peak_bytes(1);
+#ifdef NINFER_VOLTA_BUILD
+    if (min_segments == 1) {
+        capacity = std::max(capacity,
+                            detail::packed_attention_volta_flash_workspace_capacity_bytes(
+                                min_tokens, max_tokens));
+    }
+#endif
+    return capacity;
 }
 
 void softmax_attention(const Tensor& q, const Tensor& k, const Tensor& v,
@@ -121,13 +129,15 @@ void packed_softmax_attention(const Tensor& q, const Tensor& k, const Tensor& v,
 
 void packed_softmax_attention(const Tensor& q, const Tensor& k, const Tensor& v,
                               AttentionHeadGeometry geometry, float scale,
-                              std::int32_t segment_length, Tensor& out, cudaStream_t stream) {
+                              std::int32_t segment_length, WorkspaceArena& workspace, Tensor& out,
+                              cudaStream_t stream) {
     const std::int32_t tokens =
         validate_qkv(q, k, v, out, geometry, scale, "packed_softmax_attention");
     if (segment_length <= 0 || tokens % segment_length != 0) {
         throw std::invalid_argument("packed_softmax_attention: invalid uniform segment length");
     }
-    detail::packed_attention_uniform_launch(q, k, v, segment_length, out, stream);
+    auto scope = workspace.scope();
+    detail::packed_attention_uniform_launch(q, k, v, segment_length, workspace, out, stream);
 }
 
 } // namespace ninfer::ops

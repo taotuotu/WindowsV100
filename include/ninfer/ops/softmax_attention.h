@@ -88,16 +88,20 @@ void packed_softmax_attention(const Tensor& q, const Tensor& k, const Tensor& v,
 /**
  * Equal-length form of packed_softmax_attention. T is divisible by segment_length and consecutive
  * ranges [s*segment_length,(s+1)*segment_length) are the independent segments. Segment descriptors
- * are derived directly, so this form needs no workspace or descriptor-setup launch.
+ * are derived directly. The caller owns transient workspace; it is used only by selected
+ * implementations and its required capacity is reported by
+ * packed_softmax_attention_workspace_capacity_bytes().
  */
 void packed_softmax_attention(const Tensor& q, const Tensor& k, const Tensor& v,
                               AttentionHeadGeometry geometry, float scale,
-                              std::int32_t segment_length, Tensor& out, cudaStream_t stream);
+                              std::int32_t segment_length, WorkspaceArena& workspace,
+                              Tensor& out, cudaStream_t stream);
 
 /**
  * Return caller-owned transient capacity for every legal (T,S) pair in the inclusive envelope.
- * A pair is legal when 1 <= S <= T. An envelope with no legal pair throws; a legal single-segment
- * envelope may return zero.
+ * A pair is legal when 1 <= S <= T. The result covers the variable-length packed entry and the
+ * equal-length entry, including any eligible single-segment route. An envelope with no legal pair
+ * throws; a legal envelope may return zero.
  */
 [[nodiscard]] std::size_t packed_softmax_attention_workspace_capacity_bytes(
     AttentionHeadGeometry geometry, std::int32_t min_tokens, std::int32_t max_tokens,

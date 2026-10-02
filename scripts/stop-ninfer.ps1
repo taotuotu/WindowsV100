@@ -1,10 +1,22 @@
 [CmdletBinding()]
 param(
-    [switch]$List
+    [switch]$List,
+    [string]$ApiKey
 )
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = [System.IO.Path]::GetFullPath((Resolve-Path (Join-Path $PSScriptRoot '..')).Path)
+if (-not $PSBoundParameters.ContainsKey('ApiKey')) {
+    $taskConfigPath = Join-Path $repoRoot '.local/windows-server.psd1'
+    if (Test-Path -LiteralPath $taskConfigPath -PathType Leaf) {
+        try {
+            $taskConfig = Import-PowerShellDataFile -LiteralPath $taskConfigPath
+            if ($taskConfig.ContainsKey('ApiKey')) { $ApiKey = [string]$taskConfig.ApiKey }
+        } catch {
+            Write-Warning 'Personal configuration could not be read; authenticated shutdown may require -ApiKey.'
+        }
+    }
+}
 $executableNames = @(
     'ninfer-windows-serve.exe',
     'ninfer-windows-text.exe',
@@ -52,6 +64,37 @@ function Test-IsRepositoryNInferProcess {
     foreach ($directory in $allowedDirectories) {
         if (Test-PathWithinDirectory -Path $ExecutablePath -Directory $directory) { return $true }
     }
+    return $false
+}
+
+function Request-GracefulServerShutdown {
+    param([System.Diagnostics.Process]$Process)
+
+    if ($Process.ProcessName -ne 'ninfer-windows-serve') { return $false }
+    $listeners = @(Get-NetTCPConnection -State Listen -OwningProcess $Process.Id -ErrorAction SilentlyContinue)
+    foreach ($listener in $listeners) {
+        $loopback = switch ($listener.LocalAddress) {
+            '127.0.0.1' { '127.0.0.1' }
+            '0.0.0.0' { '127.0.0.1' }
+            '::1' { '[::1]' }
+            '::' { '[::1]' }
+            default { $null }
+        }
+        if (-not $loopback) { continue }
+        $shutdownUri = 'http://{0}:{1}/ui/shutdown' -f $loopback, $listener.LocalPort
+        $shutdownHeaders = @{'X-NInfer-Control' = '1'}
+        if ($ApiKey) { $shutdownHeaders.Authorization = 'Bearer ' + $ApiKey }
+        try {
+            Invoke-RestMethod -Method Post -Uri $shutdownUri -Headers $shutdownHeaders -TimeoutSec 5 | Out-Null
+        } catch {
+            continue
+        }
+        Write-Host ('PID {0}: shutdown requested; waiting for pending cache saves.' -f $Process.Id)
+        if ($Process.WaitForExit(30000)) { return $true }
+        Write-Warning ('PID {0} did not finish shutdown within 30 seconds; forcing termination. The latest cache save may be incomplete.' -f $Process.Id)
+        return $false
+    }
+    Write-Warning ('PID {0}: local shutdown was unavailable or rejected; forcing termination. The latest cache save may be incomplete.' -f $Process.Id)
     return $false
 }
 
@@ -123,9 +166,13 @@ foreach ($target in $targets) {
             -not (Test-IsRepositoryNInferProcess -Name $liveExecutableName -ExecutablePath $process.Path)) {
             throw 'the PID no longer points to the same in-repository NInfer executable'
         }
-        Stop-Process -InputObject $process -Force -ErrorAction Stop
-        if (-not $process.WaitForExit(5000)) {
-            throw 'termination was requested, but the process did not exit within five seconds'
+        if (-not (Request-GracefulServerShutdown -Process $process)) {
+            if (-not $process.HasExited) {
+                Stop-Process -InputObject $process -Force -ErrorAction Stop
+            }
+            if (-not $process.WaitForExit(5000)) {
+                throw 'termination was requested, but the process did not exit within five seconds'
+            }
         }
         $stoppedCount++
         Write-Host ('Stopped PID {0} ({1}).' -f $target.Id, $target.Name)

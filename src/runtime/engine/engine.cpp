@@ -10,12 +10,15 @@
 #include "targets/registry.h"
 
 #include <algorithm>
+#include <cstring>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
 #include <utility>
 #include <variant>
+#include <vector>
 
 namespace ninfer {
 namespace {
@@ -520,6 +523,103 @@ RuntimeStats Engine::runtime_stats() const {
         impl_->core);
 }
 
+class ContextCacheSnapshot::Impl final : public ContextCacheWriter {
+public:
+    explicit Impl(std::uint64_t maximum_bytes) {
+        if (maximum_bytes == 0 ||
+            maximum_bytes > kDefaultMaximumContextCacheSnapshotBytes ||
+            maximum_bytes > std::numeric_limits<std::size_t>::max()) {
+            throw std::invalid_argument("context-cache snapshot byte limit is invalid");
+        }
+        maximum_bytes_ = static_cast<std::size_t>(maximum_bytes);
+        chunks_.reserve(1U + (maximum_bytes_ - 1U) / kChunkBytes);
+    }
+
+    void write(std::span<const std::byte> bytes) override {
+        if (bytes.size() > maximum_bytes_ - bytes_written_) {
+            throw ContextCacheBudgetExceeded(
+                "context-cache archive exceeds the configured host snapshot byte limit");
+        }
+
+        std::size_t source_offset = 0;
+        while (source_offset < bytes.size()) {
+            const std::size_t chunk_index = bytes_written_ / kChunkBytes;
+            const std::size_t chunk_offset = bytes_written_ % kChunkBytes;
+            if (chunk_index == chunks_.size()) {
+                const std::size_t allocated_before = chunk_index * kChunkBytes;
+                const std::size_t chunk_capacity =
+                    std::min(kChunkBytes, maximum_bytes_ - allocated_before);
+                chunks_.push_back(std::unique_ptr<std::byte[]>(new std::byte[chunk_capacity]));
+                allocated_bytes_ += chunk_capacity;
+            }
+
+            const std::size_t allocated_before = chunk_index * kChunkBytes;
+            const std::size_t chunk_capacity =
+                std::min(kChunkBytes, maximum_bytes_ - allocated_before);
+            const std::size_t count =
+                std::min(chunk_capacity - chunk_offset, bytes.size() - source_offset);
+            std::memcpy(chunks_[chunk_index].get() + chunk_offset,
+                        bytes.data() + source_offset, count);
+            bytes_written_ += count;
+            source_offset += count;
+        }
+    }
+
+    void set_stats(ContextCacheSnapshotStats stats) {
+        if (stats.bytes != bytes_written_) {
+            throw std::logic_error("context-cache snapshot byte count does not match its archive");
+        }
+        stats_ = stats;
+    }
+
+    [[nodiscard]] const ContextCacheSnapshotStats& stats() const noexcept { return stats_; }
+    [[nodiscard]] std::uint64_t allocated_bytes() const noexcept { return allocated_bytes_; }
+
+    void write_to(ContextCacheWriter& writer) const {
+        std::size_t remaining = static_cast<std::size_t>(stats_.bytes);
+        for (const auto& chunk : chunks_) {
+            const std::size_t count = std::min(kChunkBytes, remaining);
+            if (count != 0) { writer.write(std::span<const std::byte>(chunk.get(), count)); }
+            remaining -= count;
+        }
+        if (remaining != 0) {
+            throw std::logic_error("context-cache snapshot storage is incomplete");
+        }
+    }
+
+private:
+    static constexpr std::size_t kChunkBytes = 16U << 20;
+    std::size_t maximum_bytes_ = 0;
+    std::size_t bytes_written_ = 0;
+    std::size_t allocated_bytes_ = 0;
+    std::vector<std::unique_ptr<std::byte[]>> chunks_;
+    ContextCacheSnapshotStats stats_;
+};
+
+ContextCacheSnapshot::ContextCacheSnapshot() noexcept = default;
+ContextCacheSnapshot::~ContextCacheSnapshot() = default;
+ContextCacheSnapshot::ContextCacheSnapshot(ContextCacheSnapshot&&) noexcept = default;
+ContextCacheSnapshot& ContextCacheSnapshot::operator=(ContextCacheSnapshot&&) noexcept = default;
+
+ContextCacheSnapshot::ContextCacheSnapshot(std::unique_ptr<Impl> impl) noexcept
+    : impl_(std::move(impl)) {}
+
+ContextCacheSnapshot::operator bool() const noexcept { return impl_ != nullptr; }
+
+const ContextCacheSnapshotStats& ContextCacheSnapshot::stats() const noexcept {
+    static const ContextCacheSnapshotStats empty;
+    return impl_ != nullptr ? impl_->stats() : empty;
+}
+
+std::uint64_t ContextCacheSnapshot::allocated_bytes() const noexcept {
+    return impl_ != nullptr ? impl_->allocated_bytes() : 0;
+}
+
+void ContextCacheSnapshot::write_to(ContextCacheWriter& writer) const {
+    if (impl_ == nullptr) { throw std::logic_error("context-cache snapshot is empty"); }
+    impl_->write_to(writer);
+}
+
 bool Engine::is_available() const {
     if (impl_ == nullptr) { return false; }
     return std::visit(
@@ -570,6 +670,14 @@ ContextCacheSnapshotStats Engine::save_context_cache(ContextCacheWriter& writer)
             }
         },
         impl_->core);
+}
+
+ContextCacheSnapshot Engine::capture_context_cache(std::uint64_t maximum_bytes) {
+    if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
+    auto snapshot = std::make_unique<ContextCacheSnapshot::Impl>(maximum_bytes);
+    const ContextCacheSnapshotStats stats = save_context_cache(*snapshot);
+    snapshot->set_stats(stats);
+    return ContextCacheSnapshot(std::move(snapshot));
 }
 
 ContextCacheSnapshotStats Engine::load_context_cache(ContextCacheReader& reader) {

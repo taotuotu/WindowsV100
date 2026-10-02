@@ -177,7 +177,7 @@ void write_state_link(ProgramImplCore& program, ContextCacheExportState& session
     bool is_new = false;
     const std::uint64_t link_id = reserve_export_link(session, key, is_new);
     auto* const counter = dynamic_cast<CountingContextCacheWriter*>(&writer);
-    std::optional<PinnedHostBuffer> staging;
+    PinnedHostBuffer* staging = nullptr;
     std::uint8_t flags = 0;
     std::size_t payload_bytes = 0;
     if (is_new) {
@@ -188,11 +188,11 @@ void write_state_link(ProgramImplCore& program, ContextCacheExportState& session
                                              residency == StateReplicaResidency::Both);
         payload_bytes = program.state_images->host_layout().image_bytes;
         if (counter == nullptr) {
-            staging.emplace(payload_bytes);
+            staging = &export_transfer_staging(session, payload_bytes);
             auto* data = static_cast<std::byte*>(staging->data());
             try {
                 program.state_store->copy_snapshot_payload(
-                    state, std::span<std::byte>(data, staging->size()), program.device.stream);
+                    state, std::span<std::byte>(data, payload_bytes), program.device.stream);
             } catch (const ninfer::ContextCacheOwnershipError&) {
                 try {
                     program.device.synchronize();
@@ -218,14 +218,15 @@ void write_state_link(ProgramImplCore& program, ContextCacheExportState& session
     } else {
         write_payload(writer, std::span<const std::byte>(
                                   static_cast<const std::byte*>(staging->data()),
-                                  staging->size()));
+                                  payload_bytes));
     }
     publish_export_link(session, key, link_id);
 }
 
 void write_kv_link(ProgramImplCore& program, ContextCacheExportState& session,
                    LogicalKVPageStore& pages, LogicalKVPageHandle page,
-                   SnapshotObjectKind kind, ninfer::ContextCacheWriter& writer) {
+                   SnapshotObjectKind kind, ninfer::ContextCacheWriter& writer,
+                   std::span<std::byte> prefetched = {}) {
     if ((kind != SnapshotObjectKind::MainKVPage && kind != SnapshotObjectKind::BackendKVPage) ||
         !pages.stable_for_snapshot(page)) {
         throw ninfer::ContextCacheOwnershipError(
@@ -235,7 +236,7 @@ void write_kv_link(ProgramImplCore& program, ContextCacheExportState& session,
     bool is_new = false;
     const std::uint64_t link_id = reserve_export_link(session, key, is_new);
     auto* const counter = dynamic_cast<CountingContextCacheWriter*>(&writer);
-    std::optional<PinnedHostBuffer> staging;
+    PinnedHostBuffer* staging = nullptr;
     std::uint8_t flags = 0;
     const std::uint32_t columns = pages.committed_columns(page);
     const HostKVPageLayout layout = plan_host_kv_page_layout(pages.physical_pool().geometry());
@@ -245,10 +246,15 @@ void write_kv_link(ProgramImplCore& program, ContextCacheExportState& session,
         flags = snapshot_residency_flags(device_replica, host_replica);
         if (counter != nullptr) {
             // The dry-run sizes the owner frame without issuing duplicate device-to-host traffic.
+        } else if (!prefetched.empty()) {
+            if (prefetched.size() != layout.page_stride || host_replica || !device_replica) {
+                throw ninfer::ContextCacheOwnershipError("context-cache prefetched KV geometry mismatch");
+            }
+            zero_uncommitted_kv_columns(prefetched, layout, columns);
         } else {
-            staging.emplace(layout.page_stride);
+            staging = &export_transfer_staging(session, layout.page_stride);
             auto* data = static_cast<std::byte*>(staging->data());
-            std::span<std::byte> payload(data, staging->size());
+            std::span<std::byte> payload(data, layout.page_stride);
             if (host_replica) {
             if (program.host_kv_extents == nullptr) {
                 throw ninfer::ContextCacheOwnershipError(
@@ -298,10 +304,12 @@ void write_kv_link(ProgramImplCore& program, ContextCacheExportState& session,
     write_u64(writer, layout.page_stride);
     if (counter != nullptr) {
         counter->add(layout.page_stride);
+    } else if (!prefetched.empty()) {
+        write_payload(writer, std::span<const std::byte>(prefetched));
     } else {
         write_payload(writer, std::span<const std::byte>(
                                   static_cast<const std::byte*>(staging->data()),
-                                  staging->size()));
+                                  layout.page_stride));
     }
     publish_export_link(session, key, link_id);
 }
@@ -324,9 +332,57 @@ void write_kv_address(ProgramImplCore& program, ContextCacheExportState& session
     write_u32(writer, frontier);
     write_u32(writer, addresses.checkpoint_frontier(address));
     write_u32(writer, mapped);
-    for (std::uint32_t page_index = 0; page_index < mapped; ++page_index) {
-        const LogicalKVPageHandle page = addresses.logical_page(address, page_index);
-        write_kv_link(program, session, pages, page, kind, writer);
+    constexpr std::uint32_t kTransferPages = 32;
+    const bool counting = dynamic_cast<CountingContextCacheWriter*>(&writer) != nullptr;
+    const HostKVPageLayout layout = plan_host_kv_page_layout(pages.physical_pool().geometry());
+    for (std::uint32_t first = 0; first < mapped; first += kTransferPages) {
+        const std::uint32_t count = std::min(kTransferPages, mapped - first);
+        std::array<LogicalKVPageHandle, kTransferPages> logical;
+        std::array<DeviceKVPageHandle, kTransferPages> physical;
+        std::array<int, kTransferPages> slots;
+        slots.fill(-1);
+        std::size_t transfers = 0;
+        for (std::uint32_t i = 0; i < count; ++i) {
+            logical[i] = addresses.logical_page(address, first + i);
+            if (!pages.stable_for_snapshot(logical[i])) {
+                throw ninfer::ContextCacheOwnershipError("context-cache KV batch has an unstable page");
+            }
+            const SnapshotObjectKey key{kind, pages.archive_key(logical[i])};
+            if (!counting && !session.object_ids.contains(key) &&
+                pages.device_resident(logical[i]) && !pages.host_resident(logical[i])) {
+                slots[i] = static_cast<int>(transfers);
+                physical[transfers++] = pages.physical(logical[i]);
+            }
+        }
+        std::span<std::byte> payload;
+        if (transfers != 0) {
+            if (layout.page_stride == 0 || transfers >
+                    std::numeric_limits<std::size_t>::max() / layout.page_stride) {
+                throw std::overflow_error("context-cache KV batch transfer extent overflows");
+            }
+            const std::size_t bytes = transfers * layout.page_stride;
+            if (!session.kv_batch_staging || session.kv_batch_staging->size() < bytes) {
+                session.kv_batch_staging = std::make_shared<PinnedHostBuffer>(bytes);
+            }
+            payload = std::span<std::byte>(
+                static_cast<std::byte*>(session.kv_batch_staging->data()), bytes);
+            std::fill(payload.begin(), payload.end(), std::byte{0});
+            try {
+                pages.physical_pool().copy_to_host(
+                    std::span<const DeviceKVPageHandle>(physical.data(), transfers), payload,
+                    program.device.stream);
+                program.device.synchronize();
+            } catch (...) {
+                try { program.device.synchronize(); } catch (...) {}
+                throw ninfer::ContextCacheOwnershipError("context-cache KV batch D2H snapshot failed");
+            }
+        }
+        for (std::uint32_t i = 0; i < count; ++i) {
+            const auto page_payload = slots[i] < 0 ? std::span<std::byte>{} :
+                payload.subspan(static_cast<std::size_t>(slots[i]) * layout.page_stride,
+                                layout.page_stride);
+            write_kv_link(program, session, pages, logical[i], kind, writer, page_payload);
+        }
     }
 }
 

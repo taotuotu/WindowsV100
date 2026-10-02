@@ -133,4 +133,22 @@ void packed_attention_uniform_launch(const Tensor& q, const Tensor& k, const Ten
         q, k, v, segment_length, packed_attention_uniform_tile(segment_length), out, stream);
 }
 
+void packed_attention_uniform_launch(const Tensor& q, const Tensor& k, const Tensor& v,
+                                     std::int32_t segment_length, WorkspaceArena& workspace,
+                                     Tensor& out, cudaStream_t stream) {
+#ifdef NINFER_VOLTA_BUILD
+    const std::int32_t tokens = q.ne[2];
+    if (segment_length == tokens && packed_attention_volta_flash_eligible(tokens)) {
+        const std::size_t required =
+            packed_attention_volta_flash_workspace_capacity_bytes(tokens, tokens);
+        if (workspace.capacity() - workspace.used() >= required) {
+            packed_attention_volta_flash_launch(q, k, v, out, workspace, stream);
+            return;
+        }
+    }
+#endif
+    packed_attention_uniform_launch_with_tile(
+        q, k, v, segment_length, packed_attention_uniform_tile(segment_length), out, stream);
+}
+
 } // namespace ninfer::ops::detail

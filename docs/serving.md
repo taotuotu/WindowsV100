@@ -42,9 +42,21 @@ logging. A request enters these counters at generation preparation; authenticati
 failures and monitoring polls are not generation attempts. Counter/history updates use short
 locks; querying published RuntimeStats does not synchronize GPU work. On Windows, `disk_cache`
 adds enabled state, disk bytes, session/save/restore/miss/failure counts, last save/restore sizes,
-current operation and a non-sensitive status code. Unavailable service
+current operation and a non-sensitive status code. It also reports host snapshot queue count and
+allocated bytes, capture reservation and activity, capture/write times, and coalesced/cancelled
+snapshot counts. Queue bytes describe RAM, separately from the disk budget. Unavailable service
 returns 503 with `available:false` and the same schema. No prompt, generated text, API key,
 client address or full artifact path is exposed.
+
+Windows terminal responses wait for an immutable host capture of the stable Engine checkpoint;
+disk checksumming and atomic commit then run in a bounded background worker. The generation
+slot is released before the terminal HTTP frame. A same-session next request can reuse its
+resident Engine state while the previous archive is being written; restoring a session waits for
+that session's pending write. At most one active write and one pending archive are retained, with
+a 16 GiB per-archive limit and a 32 GiB total host archive allocation limit including capture.
+`[DONE]` does not confirm disk durability. Normal shutdown drains queued writes; forced exit or
+power loss may leave only the previous complete generation. Clearing invalidates pending
+captures/writes and removes committed snapshots. See the Windows guide for controls.
 
 The browser computes aggregate decode/prefill throughput from token-counter changes divided by
 the server uptime change between snapshots. This recent-window total is distinct from a completed

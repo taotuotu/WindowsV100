@@ -2,6 +2,7 @@
 
 #include "targets/qwen3_6/impl/runtime/context_cache_snapshot.h"
 #include "targets/qwen3_6/impl/runtime/program.h"
+#include "core/arena.h"
 
 #include <algorithm>
 #include <array>
@@ -79,8 +80,19 @@ struct ContextCacheExportState {
     std::unordered_map<SnapshotObjectKey, std::uint64_t, SnapshotObjectKeyHash> object_ids;
     std::unordered_set<OwnerCapabilityKey, OwnerCapabilityKeyHash> private_owners;
     std::unordered_set<OwnerCapabilityKey, OwnerCapabilityKeyHash> shared_owners;
+    // Reuse pinned transfer storage for the whole export instead of locking/unlocking host
+    // pages for every KV object. Sizing copies share it but never read or write payload bytes.
+    std::shared_ptr<PinnedHostBuffer> transfer_staging;
+    std::shared_ptr<PinnedHostBuffer> kv_batch_staging;
     bool closed = false;
 };
+
+PinnedHostBuffer& export_transfer_staging(ContextCacheExportState& session, std::size_t bytes) {
+    if (!session.transfer_staging || session.transfer_staging->size() < bytes) {
+        session.transfer_staging = std::make_shared<PinnedHostBuffer>(bytes);
+    }
+    return *session.transfer_staging;
+}
 
 struct ContextCacheImportObject {
     std::uint64_t link_id = 0;

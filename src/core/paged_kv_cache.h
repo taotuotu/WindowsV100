@@ -233,6 +233,9 @@ public:
 
     void copy_to_host(std::span<const DeviceKVPageHandle> source, HostKVAllocationView destination,
                       cudaStream_t stream = nullptr) const;
+    // Caller-owned transient canonical HostKVPageLayout storage, alive through stream completion.
+    void copy_to_host(std::span<const DeviceKVPageHandle> source, std::span<std::byte> destination,
+                      cudaStream_t stream = nullptr) const;
     void copy_from_host(HostKVAllocationConstView source,
                         std::span<const DeviceKVPageHandle> destination,
                         cudaStream_t stream = nullptr) const;

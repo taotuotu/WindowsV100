@@ -879,19 +879,30 @@
           ui.globalDiskCache.textContent = "磁盘缓存未启用。";
           return;
         }
-        const operations = { idle: "就绪", saving: "保存中", restoring: "恢复中", clearing: "清理中" };
+        const operations = { idle: "就绪", capturing: "准备缓存", saving: "后台写盘", restoring: "恢复中", clearing: "清理中" };
         const statuses = { none: "", no_checkpoint: "尚无完整检查点", miss: "该会话尚无磁盘记录",
           identity_mismatch: "配置不匹配，已冷启动", checksum_mismatch: "校验失败",
-          budget_exceeded: "磁盘预算不足，保留旧记录", io_error: "磁盘读写失败",
-          engine_error: "快照处理失败", fallback_restored: "已恢复上一代", cancelled: "恢复已取消" };
+          budget_exceeded: "快照预算不足，保留旧记录", queue_full: "其他会话的保存任务占满队列，保留旧记录",
+          io_error: "磁盘读写失败",
+          engine_error: "快照处理失败", fallback_restored: "已恢复上一代", cancelled: "任务已取消" };
         const bytes = metricNumber(disk.bytes, true);
         const sessions = metricNumber(disk.sessions, true);
         const saves = metricNumber(disk.saves, true);
         const restores = metricNumber(disk.restores, true);
+        const queuedSnapshots = metricNumber(disk.queued_snapshots, true);
+        const queuedBytes = metricNumber(disk.queued_snapshot_bytes, true);
+        const captureReservedBytes = metricNumber(disk.capture_reserved_bytes, true);
+        const captureSeconds = metricNumber(disk.last_capture_seconds);
+        const writeSeconds = metricNumber(disk.last_write_seconds);
+        const coalesced = metricNumber(disk.coalesced_snapshots, true);
         const operation = operations[disk.operation] || "状态未知";
         const status = Object.prototype.hasOwnProperty.call(statuses, disk.last_error_code)
           ? statuses[disk.last_error_code] : "状态未知";
-        ui.globalDiskCache.textContent = `磁盘缓存 ${operation} · ${bytes === null ? "—" : (bytes / 1073741824).toFixed(2)} GiB · ${sessions === null ? "—" : sessions} 个会话 · 保存 ${saves === null ? "—" : saves} / 恢复 ${restores === null ? "—" : restores}${status ? ` · ${status}` : ""}`;
+        const queueText = `保存队列 ${queuedSnapshots === null ? "—" : queuedSnapshots} 个 · 内存 ${queuedBytes === null ? "—" : (queuedBytes / 1073741824).toFixed(2)} GiB`;
+        const captureText = disk.capture_in_progress === true && captureReservedBytes !== null
+          ? ` · 准备上限 ${(captureReservedBytes / 1073741824).toFixed(2)} GiB` : "";
+        const timingText = `准备 ${captureSeconds === null ? "—" : `${captureSeconds.toFixed(2)}s`} / 写盘 ${writeSeconds === null ? "—" : `${writeSeconds.toFixed(2)}s`}`;
+        ui.globalDiskCache.textContent = `磁盘缓存 ${operation} · ${bytes === null ? "—" : (bytes / 1073741824).toFixed(2)} GiB · ${sessions === null ? "—" : sessions} 个会话 · 保存 ${saves === null ? "—" : saves} / 恢复 ${restores === null ? "—" : restores} · ${queueText}${captureText} · ${timingText} · 合并 ${coalesced === null ? "—" : coalesced}${status ? ` · ${status}` : ""}`;
       }
 
       function renderGlobalMetricsTrend() {

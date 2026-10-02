@@ -1,4 +1,4 @@
-// Public-Op benchmark for plain/uniform and packed dense Softmax Attention.
+// Public-Op benchmark for uniform and packed dense Softmax Attention.
 // Tile selection and launch decomposition remain private to packed_softmax_attention().
 
 #include "ninfer/ops/softmax_attention.h"
@@ -227,13 +227,8 @@ public:
 
     void launch(Entry entry, cudaStream_t stream) {
         if (entry == Entry::Uniform) {
-            if (segment_lengths_.size() == 1) {
-                ops::softmax_attention(q_tensor_, k_tensor_, v_tensor_, kGeometry, kScale,
-                                       workspace_, output_tensor_, stream);
-            } else {
-                ops::packed_softmax_attention(q_tensor_, k_tensor_, v_tensor_, kGeometry, kScale,
-                                              segment_lengths_.front(), output_tensor_, stream);
-            }
+            ops::packed_softmax_attention(q_tensor_, k_tensor_, v_tensor_, kGeometry, kScale,
+                                          segment_lengths_.front(), workspace_, output_tensor_, stream);
         } else {
             ops::packed_softmax_attention(q_tensor_, k_tensor_, v_tensor_, kGeometry, kScale,
                                           cu_tensor_, workspace_, output_tensor_, stream);
@@ -247,7 +242,7 @@ public:
     }
 
     [[nodiscard]] std::size_t workspace_bytes(Entry entry) const noexcept {
-        return entry == Entry::Packed ? workspace_bytes_ : 0;
+        return workspace_bytes_;
     }
 
     [[nodiscard]] double useful_flops() const noexcept {

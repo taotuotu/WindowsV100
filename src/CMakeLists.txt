@@ -343,9 +343,11 @@ if(CMAKE_CUDA_ARCHITECTURES STREQUAL "70")
     ops/linear_swiglu/nvfp4/nvfp4_linear_swiglu_volta_qpn.cu
     ops/linear_swiglu/nvfp4/nvfp4_linear_swiglu_qpn_split.cu
     ops/linear_swiglu/q4/q4_linear_swiglu_cutlass_sm70.cu
-    ops/launcher/gqa_attention_volta_flash.cu)
+    ops/launcher/gqa_attention_volta_flash.cu
+    ops/softmax_attention/dense/packed/volta_flash.cu)
   set_source_files_properties(
     ops/launcher/gqa_attention_volta_flash.cu
+    ops/softmax_attention/dense/packed/volta_flash.cu
     TARGET_DIRECTORY ninfer_ops
     PROPERTIES
       INCLUDE_DIRECTORIES "${PROJECT_SOURCE_DIR}/third_party/llama_cpp_fattn"

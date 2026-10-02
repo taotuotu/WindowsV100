@@ -900,6 +900,14 @@ void HttpServer::handle_ui_metrics(const httplib::Request&, httplib::Response& r
                                       {"failures", disk.failures},
                                       {"last_saved_bytes", disk.last_saved_bytes},
                                       {"last_restored_bytes", disk.last_restored_bytes},
+                                      {"queued_snapshots", disk.queued_snapshots},
+                                      {"queued_snapshot_bytes", disk.queued_snapshot_bytes},
+                                      {"capture_reserved_bytes", disk.capture_reserved_bytes},
+                                      {"coalesced_snapshots", disk.coalesced_snapshots},
+                                      {"cancelled_snapshots", disk.cancelled_snapshots},
+                                      {"last_capture_seconds", disk.last_capture_seconds},
+                                      {"last_write_seconds", disk.last_write_seconds},
+                                      {"capture_in_progress", disk.capture_in_progress},
                                       {"operation", disk.operation},
                                       {"last_error_code", disk.last_error_code}};
     }

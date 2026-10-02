@@ -120,6 +120,13 @@ public:
     // commit, and the identity of the backing store.
     [[nodiscard]] ContextCacheSnapshotStats save_context_cache(ContextCacheWriter& writer);
 
+    // Captures the complete catalog into bounded, immutable host-owned chunks on the Engine
+    // worker. After capture returns, the snapshot is independent of Engine/Program/CUDA lifetime
+    // and may be written by a background thread. This is an idle-only Generation operation; the
+    // default per-snapshot archive limit is 16 GiB. A budget failure produces no usable snapshot.
+    [[nodiscard]] ContextCacheSnapshot capture_context_cache(
+        std::uint64_t maximum_bytes = kDefaultMaximumContextCacheSnapshotBytes);
+
     // Restores a complete context-cache snapshot into an empty Generation Engine catalog. The
     // snapshot is read and validated on the Engine worker before any restored owner is published.
     // A failed read or import leaves the Engine catalog unchanged.

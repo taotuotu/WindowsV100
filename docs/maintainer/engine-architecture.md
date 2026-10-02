@@ -121,10 +121,21 @@ Engine 还提供 idle-only 的流式 `save_context_cache(ContextCacheWriter&)` �
 record校验或导入失败都会撤销未发布的导入，owner回滚失败则标记Engine不可用并传播所有权错误。
 调用者可用idle-only clear预先清空inactive目录，但不能绕过Engine直接操作CUDA指针或Program文件格式。
 
+需要与磁盘写入并行时，Generation Engine 可调用 idle-only 的
+`capture_context_cache(maximum_bytes)`。Engine worker 仍是唯一 Program/CUDA 访问者，但将完整 opaque
+archive 捕获到每块 16 MiB 的 host-owned immutable chunks；默认 archive 上限为 16 GiB。成功返回后，
+`ContextCacheSnapshot` 不再引用 Engine、Program、KV、StateImage 或任何 CUDA 资源，可在 Engine 恢复接收
+请求后由后台线程调用 `write_to(ContextCacheWriter&)`。队列内存预算按 `allocated_bytes()` 报告的实际
+chunk 容量计费，不能只按 `stats().bytes` 的 archive 长度计费。超出上限时 capture 抛出 typed budget error，
+不返回部分 archive。此 API 不改变 archive framing；同步 `save_context_cache` 仍用于无需异步磁盘写入的
+调用方。
+
 Windows serving 的 `SessionCacheStore` 位于 `src/serve/session_cache.*`，只负责对 opaque Engine 流做
 checksum、artifact/runtime identity 验证、会话文件命名、bounded disk budget 与原子磁盘提交。它不能
-解释Program record，也不拥有CUDA/KV/StateImage内存。GenerationService在请求终结后调用save；切换
-session时先clear Engine inactive catalog，再惰性load目标会话。清理UI控制同时清Engine与磁盘目录。
+解释Program record，也不拥有CUDA/KV/StateImage内存。GenerationService在请求终结后捕获稳定归档，
+随后释放请求名额；后台worker只持有Host归档并执行写盘，不访问Engine。切换session时先clear
+Engine inactive catalog，再等待目标会话的待写入归档并惰性load。清理UI控制同时清Engine与磁盘目录，
+并通过epoch使清理前的capture/save任务失效。正常析构排空写入队列；HTTP终帧不代表磁盘提交完成。
 
 ### 2.4 Program
 

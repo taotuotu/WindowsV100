@@ -18,7 +18,7 @@
 
 ## 快速开始
 
-需要 Windows x64、匹配的 NVIDIA 驱动，以及 [Microsoft x64 Visual C++ Redistributable](https://aka.ms/vs/17/release/vc_redist.x64.exe)。预编译 ZIP 会带 CUDA 12 runtime；驱动和模型需自行安装或下载。建议至少 32 GB 系统内存、40 GB 可用磁盘用于程序和模型；默认磁盘会话缓存还可使用最多32GiB，可通过降低预算或 `-NoDiskCache` 控制。
+需要 Windows x64、匹配的 NVIDIA 驱动，以及 [Microsoft x64 Visual C++ Redistributable](https://aka.ms/vs/17/release/vc_redist.x64.exe)。预编译 ZIP 会带 CUDA 12 runtime；驱动和模型需自行安装或下载。32 GB 系统内存是基础建议，程序和模型需约 40 GB 可用磁盘。大上下文捕获检查点时，Host 归档峰值还可能额外占用最多32GiB系统内存（单份归档最多16GiB）；这是独立于默认最多32GiB磁盘会话缓存的内存预算。使用大上下文时应按峰值增加系统内存，或降低上下文，或用 `-NoDiskCache` 关闭归档。
 
 在解压后的程序目录，或已经完成构建的源码根目录，执行：
 
@@ -27,7 +27,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\download-model.ps1
 .\start-ninfer.bat
 ```
 
-`start-ninfer.bat` 是一键入口：启动模型，等待健康状态和模型列表就绪，再自动打开 **http://127.0.0.1:8110/**。首次初始化可能需要几分钟，默认等待上限10分钟。已运行的同一服务会被复用；本次新启动的服务由启动窗口持有，Ctrl+C 或关闭窗口停止它。使用 `start-ninfer.bat -Vision` 启用图像识别；也可在 `.local/windows-server.psd1` 设置 `Vision = $true`。启动失败会保留报错窗口。`stop-ninfer.bat` 一键结束本仓库 `build*`、`bin`、`dist` 和 `.local` 下路径匹配的 NInfer server、text/CLI 与 perplexity 进程，包括尚未监听的初始化进程；`stop-ninfer.bat -List` 只列出候选而不停止。它只处理明确的 NInfer 可执行文件名和当前仓库路径内的程序。
+`start-ninfer.bat` 是一键入口：启动模型，等待健康状态和模型列表就绪，再自动打开 **http://127.0.0.1:8110/**。首次初始化可能需要几分钟，默认等待上限10分钟。已运行的同一服务会被复用；本次新启动的服务由启动窗口持有，Ctrl+C 或关闭窗口停止它。使用 `start-ninfer.bat -Vision` 启用图像识别；也可在 `.local/windows-server.psd1` 设置 `Vision = $true`。启动失败会保留报错窗口。`stop-ninfer.bat` 优先向当前安装目录在本机回环地址监听的服务请求正常关闭；配置了 API key 时会使用该配置认证，最多等待30秒。未监听、连接/认证失败或超时会显示警告，再强制结束当前目录下匹配的 NInfer server、text/CLI 与 perplexity 进程，包括尚未监听的初始化进程。`stop-ninfer.bat -List` 只列出候选而不停止。
 
 页面的“全局速度”每秒左右刷新，包含网页、ZCode 和其它平台的生成调用：服务总解码/预填充吞吐、运行/排队状态、累计解码和缓存命中、最近请求与速率趋势。实时吞吐是相邻服务快照之间的真实 token 增量/耗时，与单次回答的解码阶段平均速率分开显示；解码计数不含预填充产生的首 token。请求记录只有匿名计时与计数，服务重启后重置。
 
@@ -64,17 +64,19 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-ninfer-server.
 
 ### 会话缓存与关闭服务
 
-Windows 服务的显存/主机内存里只保留当前会话；切换会话时会清掉 Engine 中旧的 inactive private/shared checkpoint，再按需从本地磁盘恢复目标会话。网页每个新对话发送独立 `X-NInfer-Session` 标识；外部客户端可发送同一请求头区分会话。不发送时，Chat/Anthropic 按首个 user turn 的内容摘要识别，Responses 沿用 `previous_response_id` 链的会话标识。模型仍逐项验证真实 token 前缀，标识只决定缓存归属。
+GPU 上的 Engine 活动状态只保留当前会话；切换会话时会清掉 Engine 中旧的 inactive private/shared checkpoint，再按需从本地磁盘恢复目标会话。网页每个新对话发送独立 `X-NInfer-Session` 标识；外部客户端可发送同一请求头区分会话。不发送时，Chat/Anthropic 按首个 user turn 的内容摘要识别，Responses 沿用 `previous_response_id` 链的会话标识。模型仍逐项验证真实 token 前缀，标识只决定缓存归属。
 
 默认启用本地磁盘缓存，目录为 `.local/context-cache`，总预算32GiB、最多8个会话；可用 `-NoDiskCache`、`-DiskCacheDirectory`、`-DiskCacheMiB`、`-DiskCacheSessions` 调整，个人配置项为 `DiskCache`、`DiskCacheDirectory`、`DiskCacheMiB`、`DiskCacheSessions`。缓存仅支持此 Windows 注册的27B MTP/None运行路径和 BF16/INT8/FP8 KV，并绑定 Vision 开关及模型 artifact 全文件SHA、模型/权重ID、KV类型和MTP参数等完整身份。首次启动需读取整个artifact计算SHA，可能延长启动。
 
-磁盘内容是 Engine 生成的真实完整 KV、GDN/recurrent、hidden state、shared/private owner与精确前缀快照，不是聊天文本替代。生成正常终结、停止或断线后自动保存当前完整且稳定的状态；切回会话时惰性恢复，取消导致内存中没有可续接的检查点时也会恢复同一会话上一份完整快照。每次保存都写完整快照，可能达数GiB并延后下一轮请求；它不增加模型运行所需GPU容量。写入采用带checksum的完整代文件与原子head切换并保留上一代；无安全checkpoint或不完整写入不会替换已提交代。进程被强制终止等任意崩溃可能丢失最近一次成功提交之后的更新。
+磁盘内容是 Engine 生成的真实完整 KV、GDN/recurrent、hidden state、shared/private owner与精确前缀快照，不是聊天文本替代。每个稳定检查点先同步捕获为不可变 Host 归档，再异步写盘；单份归档最多16GiB，活动写入、最新待写入和正在捕获的归档合计最多占用32GiB实际分配的 Host 内存。此内存上限与上面的磁盘缓存预算分开。
+
+捕获完成后请求即可返回，背景磁盘写入不占生成请求名额；同一会话可以立即继续使用 GPU，切回仍有待写入快照的会话时则要等该会话的写入完成后再恢复。写入队列最多一个活动写入和一个最新待写入快照。收到 `[DONE]` 时最新一代可能仍在写盘。落盘使用带 checksum 的完整代文件与原子 head 切换，并保留上一份完整提交；失败或不完整写入不会替换已提交代。清理缓存会使旧写入失效，避免其在清理后重新创建缓存。正常关闭会等待队列写完；强制终止、断电等情况最多只能恢复最近一份完整提交。
 
 停止或断线时，服务端已提交的输出可能多于客户端实际收到的文字；客户端也可能改写历史。下一轮只复用与实际回传历史精确匹配的检查点，必要时退回较早的前缀并重算回答尾部。落盘保证保存完整状态，不保证任意被截断的回答都能全量命中。
 
 网页完整输入计数表示本轮历史总量；“缓存命中”和“需 Prefill”显示哪些部分已经计算、哪些需要重算。启动时页面默认勾选“保留历史思考”，显式发送 `preserve_thinking=true` 以便后续轮次保留并复用实际历史reasoning；关闭后会移除非空的历史reasoning，并可能让整段更早的历史重新prefill。外部平台若要复用含实际思考的历史，应在消息中回传 `reasoning_content` 并发送 `preserve_thinking=true`，或以 `--preserve-thinking` 启动服务；服务通用默认仍为 false。空的 canonical `<think>` prologue 另有定点保留修复，不代表非空推理在 `preserve_thinking=false` 时会留下。
 
-网页自动保存期间“发送”按钮暂时禁用，但草稿仍可编辑；`/ui/metrics` 的磁盘缓存状态会显示保存/恢复运行状态。网页“清理全部缓存”在服务空闲时执行，同时删除内存及磁盘上所有会话快照并保留页面历史；下一轮需要重建。“关闭推理服务”取消当前生成并关闭当前服务。要关闭这个安装目录的全部 NInfer 程序，双击 `stop-ninfer.bat`，包含尚未启动监听的初始化进程。
+网页显示准备缓存、准备上限、准备耗时，以及保存队列和内存占用。捕获期间单请求名额仍忙；捕获完成并返回后，背景磁盘保存不会禁用“发送”，草稿也可继续编辑。`/ui/metrics` 显示准备、保存和恢复状态。网页“清理全部缓存”在没有请求交付时执行，清除 Engine 内存与磁盘上的会话快照并取消/失效旧写入，避免缓存被旧 writer 重新创建，同时保留页面历史；下一轮需要重建。“关闭推理服务”会请求当前服务退出，正常关闭会先排空保存队列。双击 `stop-ninfer.bat` 会优先向当前安装目录在本机回环地址监听的服务请求正常关闭；配置了 API key 时会使用该配置认证，最多等待30秒；未监听、连接/认证失败或无响应会显示警告，再强制结束匹配的本地 NInfer 进程。
 
 ## 性能与继续优化
 

@@ -59,6 +59,7 @@ struct VisionWorkspaceLayout {
     TensorRegion attended;
     TensorRegion qkv;
     TensorRegion attention_norm;
+    LayoutRegion attention_workspace;
     TensorRegion projected;
     TensorRegion mlp_down;
     TensorRegion mlp_up;
@@ -121,6 +122,12 @@ VisionWorkspaceLayout build_workspace_layout(std::size_t patches64, std::size_t 
             out.attention_norm = add(DType::BF16, {VisionScheduleConfig::hidden, patches},
                                      "vision attention norm/attended");
             out.attended       = out.attention_norm;
+            const std::size_t attention_bytes =
+                ops::packed_softmax_attention_workspace_capacity_bytes(
+                    {VisionScheduleConfig::head_dim, VisionScheduleConfig::heads,
+                     VisionScheduleConfig::heads}, 1, patches, 1, patches);
+            out.attention_workspace = builder.add(attention_bytes, kWorkspaceAlignment,
+                                                  "vision attention workspace");
             out.projected =
                 alias_tensor(out.qkv, DType::BF16, {VisionScheduleConfig::hidden, patches},
                              "attention projection output");
@@ -351,12 +358,14 @@ void VisionContext::encode(const VisionItemView& item, Tensor& output, DeviceSpa
                           VisionScheduleConfig::rope_theta, q, k, stream);
                 Tensor attended_heads = attended.view(
                     {VisionScheduleConfig::head_dim, VisionScheduleConfig::heads, patches});
+                WorkspaceArena attention_workspace(layout.attention_workspace.bind(backing));
                 ops::packed_softmax_attention(q, k, v,
                                               {VisionScheduleConfig::head_dim,
                                                VisionScheduleConfig::heads,
                                                VisionScheduleConfig::heads},
                                               VisionScheduleConfig::attention_scale,
-                                              control.segment_length, attended_heads, stream);
+                                              control.segment_length, attention_workspace,
+                                              attended_heads, stream);
             }
             Tensor projected = layout.projected.bind(backing);
             linear(attended, *block.projection, projected);

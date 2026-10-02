@@ -47,13 +47,28 @@ struct SessionCacheStoreStats {
     std::uint64_t last_saved_bytes = 0;
     std::uint64_t last_restored_bytes = 0;
 
-    // Current operation is one of: idle, saving, restoring, or clearing.
+    // The queue includes the active disk writer and at most one replaceable latest snapshot.
+    // queued_snapshot_bytes reports actual host chunk allocation for queued/in-flight snapshots;
+    // capture_reserved_bytes reports the maximum host allocation allowed for an Engine capture.
+    std::uint32_t queued_snapshots = 0;
+    std::uint64_t queued_snapshot_bytes = 0;
+    std::uint64_t capture_reserved_bytes = 0;
+    std::uint64_t coalesced_snapshots = 0;
+    std::uint64_t cancelled_snapshots = 0;
+    double last_capture_seconds = 0.0;
+    double last_write_seconds = 0.0;
+    bool capture_in_progress = false;
+
+    // Current operation is one of: idle, capturing, saving, restoring, or clearing.
     std::string operation = "idle";
     // A closed, non-sensitive status code; never contains a path, session key, prompt, or output.
     // Current values include none, disabled, no_checkpoint, miss, identity_mismatch,
-    // checksum_mismatch, budget_exceeded, io_error, engine_error, fallback_restored, and cancelled.
+    // checksum_mismatch, budget_exceeded, queue_full, io_error, engine_error, fallback_restored,
+    // and cancelled.
     std::string last_error_code = "none";
 };
+
+enum class SessionCacheCaptureResult { Queued, NoCheckpoint, Skipped };
 
 class SessionCacheStore {
 public:
@@ -66,10 +81,13 @@ public:
     SessionCacheStore(const SessionCacheStore&) = delete;
     SessionCacheStore& operator=(const SessionCacheStore&) = delete;
 
-    // Saves the Engine's full immutable private/shared checkpoint catalog. A false result means
-    // there was no complete checkpoint or the configured disk budget could not accommodate the
-    // replacement; in either case the previously committed generations remain usable.
-    [[nodiscard]] bool save(ninfer::Engine& engine, std::string_view session);
+    // Captures an immutable bounded Engine archive, then queues it for disk commit. The capture is
+    // the only Engine operation; the background writer owns host bytes and never touches Engine,
+    // Program, or CUDA state. The result belongs to this call, independently of background status.
+    // Queue admission coalesces an unstarted older snapshot and never waits for disk I/O.
+    [[nodiscard]] SessionCacheCaptureResult capture_and_enqueue(
+        ninfer::Engine& engine, std::string_view session,
+        std::function<void(std::string_view)> failure_observer = {});
 
     // Restores the newest valid generation for this session. A missing, incompatible, or corrupt
     // cache is a miss and returns false. The checkpoint runs during bounded disk reads and before

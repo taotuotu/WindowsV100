@@ -579,9 +579,20 @@ void DeviceKVPagePool::copy_to_host(std::span<const DeviceKVPageHandle> source,
         destination.layout().geometry != geometry()) {
         throw std::invalid_argument("Paged KV D2H geometry or extent is inconsistent");
     }
+    copy_to_host(source, std::span<std::byte>(destination.data(),
+                  source.size() * destination.layout().page_stride), stream);
+}
+
+void DeviceKVPagePool::copy_to_host(std::span<const DeviceKVPageHandle> source,
+                                    std::span<std::byte> destination, cudaStream_t stream) const {
+    const HostKVPageLayout host = plan_host_kv_page_layout(geometry());
+    if (host.page_stride == 0 || source.size() >
+            std::numeric_limits<std::size_t>::max() / host.page_stride ||
+        destination.size() != source.size() * host.page_stride) {
+        throw std::invalid_argument("Paged KV D2H byte extent is inconsistent");
+    }
     for (DeviceKVPageHandle page : source) { (void)physical_index(page); }
 
-    const HostKVPageLayout& host = destination.layout();
     std::size_t begin            = 0;
     while (begin < source.size()) {
         std::size_t end = begin + 1;
