@@ -8,6 +8,9 @@ function(ninfer_add_op_bench name)
     ${PROJECT_SOURCE_DIR}/src)
   target_link_libraries(${name} PRIVATE ninfer_ops)
   target_compile_options(${name} PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-lineinfo>)
+  if(WIN32)
+    set_target_properties(${name} PROPERTIES CUDA_RUNTIME_LIBRARY Shared)
+  endif()
 endfunction()
 
 ninfer_add_op_bench(ninfer_silu_mul_bench SOURCES ops/silu_mul_bench.cu)
@@ -83,6 +86,11 @@ target_include_directories(ninfer_bench PRIVATE
   ${PROJECT_SOURCE_DIR}/third_party)
 target_compile_definitions(ninfer_bench PRIVATE NINFER_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
 target_link_libraries(ninfer_bench PRIVATE ninfer_engine CUDA::cudart)
+if(WIN32)
+  # The native text benchmark uses the same media-free frontend as the Windows text CLI.
+  target_sources(ninfer_bench PRIVATE ${PROJECT_SOURCE_DIR}/apps/windows-text/no_media_decode.cpp)
+  set_target_properties(ninfer_bench PROPERTIES CUDA_RUNTIME_LIBRARY Shared)
+endif()
 
 # Static context-cost calibrator. Transfer measurements call production Paged-KV copy primitives,
 # then release their synthetic fixtures before the public Engine optionally loads one real artifact

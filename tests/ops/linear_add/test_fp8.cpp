@@ -95,6 +95,7 @@ int run_shape(std::int32_t n, std::int32_t k, std::int32_t first_a8, std::uint32
         Invocation{1, ops::LinearPolicy::A16Only},
         Invocation{2, ops::LinearPolicy::A16Only},
         Invocation{26, ops::LinearPolicy::A16Only},
+        Invocation{33, ops::LinearPolicy::A16Only},
     };
 #else
     const std::array invocations{

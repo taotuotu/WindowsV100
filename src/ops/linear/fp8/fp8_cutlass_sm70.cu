@@ -38,6 +38,39 @@ __global__ void dequant_fp8_row_to_fp16(const std::uint8_t* __restrict__ codes, 
     out_row[pair_idx * 2 + 1] = cutlass::half_t(weight.y);
 }
 
+// Each thread loads eight adjacent FP8 codes, applies the
+// same pair decoder and FP32-to-half conversions as the scalar kernel, then stores one 128-bit
+// FP16 vector. For QPN-prepacked weights K0 is a multiple of eight, so every source vector stays
+// inside one 16-byte prepacked slice and is physically contiguous.
+__global__ void dequant_fp8_row_to_fp16_vector8(const std::uint8_t* __restrict__ codes, int n,
+                                                int k, bool prepacked,
+                                                cutlass::half_t* __restrict__ out) {
+    const int row = static_cast<int>(blockIdx.y);
+    const int vector_column = static_cast<int>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const int vectors_per_row = k / 8;
+    if (row >= n || vector_column >= vectors_per_row) { return; }
+    const int column = vector_column * 8;
+    const std::uint8_t* source =
+        prepacked ? codes + fp8_qpn_prepacked_offset(row, column, k)
+                  : codes + static_cast<std::int64_t>(row) * k + column;
+    const uint2 packed = *reinterpret_cast<const uint2*>(source);
+
+    alignas(16) cutlass::half_t converted[8];
+#pragma unroll
+    for (int pair = 0; pair < 4; ++pair) {
+        const std::uint32_t word = pair < 2 ? packed.x : packed.y;
+        const int shift = (pair & 1) * 16;
+        const std::uint16_t codes_pair = static_cast<std::uint16_t>(word >> shift);
+        const float2 weight = decode_fp8_e4m3x2(codes_pair);
+        converted[pair * 2] = cutlass::half_t(weight.x);
+        converted[pair * 2 + 1] = cutlass::half_t(weight.y);
+    }
+
+    cutlass::half_t* destination =
+        out + static_cast<std::int64_t>(row) * k + column;
+    *reinterpret_cast<uint4*>(destination) = *reinterpret_cast<const uint4*>(converted);
+}
+
 __global__ void bf16_to_fp16_kernel(const __nv_bfloat16* __restrict__ in,
                                     cutlass::half_t* __restrict__ out, std::int64_t count) {
     const std::int64_t i = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -110,10 +143,17 @@ void fp8_cutlass_sm70_launch(const Tensor& x, const Weight& w, Tensor& out, Work
     auto* input  = static_cast<cutlass::half_t*>(scratch.input.data);
 
     const dim3 block(256);
-    const dim3 grid(static_cast<unsigned>((k / 2 + 255) / 256), static_cast<unsigned>(n), 1u);
-    dequant_fp8_row_to_fp16<<<grid, block, 0, stream>>>(
-        static_cast<const std::uint8_t*>(w.qdata), n, k,
-        w.layout == QuantLayout::VoltaQpnPrepacked, weight);
+    const bool prepacked = w.layout == QuantLayout::VoltaQpnPrepacked;
+    if (k % 8 == 0) {
+        const dim3 grid(static_cast<unsigned>((k / 8 + 255) / 256),
+                        static_cast<unsigned>(n), 1u);
+        dequant_fp8_row_to_fp16_vector8<<<grid, block, 0, stream>>>(
+            static_cast<const std::uint8_t*>(w.qdata), n, k, prepacked, weight);
+    } else {
+        const dim3 grid(static_cast<unsigned>((k / 2 + 255) / 256), static_cast<unsigned>(n), 1u);
+        dequant_fp8_row_to_fp16<<<grid, block, 0, stream>>>(
+            static_cast<const std::uint8_t*>(w.qdata), n, k, prepacked, weight);
+    }
     CUDA_CHECK(cudaGetLastError());
     const std::int64_t input_count = static_cast<std::int64_t>(t) * k;
     bf16_to_fp16_kernel<<<static_cast<int>((input_count + 255) / 256), 256, 0, stream>>>(

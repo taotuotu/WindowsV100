@@ -135,6 +135,12 @@ Windows只接收一个生成请求，包括输入准备、生成和HTTP结果交
 
 磁盘缓存默认只处理此Windows注册27B的 MTP/None 路径、BF16/INT8/FP8 KV 与Vision开关对应的完整身份。store会在启动时对实际模型artifact做一次whole-file SHA256，并将模型/权重ID、KV dtype、spec backend、draft window、proposal head等与快照身份比较；Engine/Program还会校验运行archive revision与StateImage/KV pool geometry，因此更改 `Context` 或 KV容量后旧快照不兼容，会冷启动重新prefill。artifact的完整读取可能延长启动。每轮都写完整归档并计算checksum，归档可能达到数GiB、延后下一轮请求；这不会额外分配GPU内存。恢复前还会完整顺序读取候选归档验证checksum，再交给Engine流式导入，因此大快照也会增加切回会话时的磁盘I/O。当前采用两代完整快照和原子head切换，checksum或兼容性校验失败时可回退上一代；写入不完整或没有完整private continuation时保留旧提交。服务被强制杀死、断电等任意崩溃无法保证恢复到最后一个token，只能恢复最近一次完整成功提交。
 
+2026-10-02的宽输入NVFP4 SwiGLU修复将gate/up中间投影保留为FP32，最后才舍入输出。
+旧数学版本计算出的KV/状态不用于新版本续接：Windows缓存命名空间采用math revision1，
+Program owner archive采用revision4，文件外层格式仍为v2。升级后每个旧会话首次回传完整历史会
+重新Prefill；之后保存和复用新版本状态。旧快照文件不在升级时批量删除，仍受原磁盘预算和淘汰策略管理；
+浏览器及外部客户端的聊天文本不受影响。
+
 网页设置默认勾选“保留历史思考”，请求显式发送 `preserve_thinking=true`。关闭后会移除非空历史reasoning，可能从较早的assistant回答前重新Prefill。外部平台要复用含实际思考的历史，需回传 `reasoning_content` 和 `preserve_thinking=true`，或以 `--preserve-thinking` 启动服务；通用服务默认仍是false。单独的空 canonical `<think>` prologue 已有保留修复。
 
 停止或断线时，服务端可能已经提交了客户端尚未收到的输出；客户端回传的半截回答与该 endpoint 不同。缓存仍须精确匹配实际历史，不能把超前状态直接当作半截回答的状态；此时可能退回较早的 response-replay/shared checkpoint，再计算回答尾部。磁盘保存与恢复不保证任意截断位置全量命中。

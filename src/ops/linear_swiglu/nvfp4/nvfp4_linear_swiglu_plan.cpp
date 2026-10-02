@@ -134,10 +134,10 @@ std::size_t qpn_split_workspace_bytes(std::int32_t tokens) {
 
 std::size_t cutlass_route_workspace_bytes(std::int32_t tokens) {
     const std::size_t projected = static_cast<std::size_t>(
-        Nvfp4MlpGateUpGeometry::kOutputRows) * tokens * sizeof(std::uint16_t);
+        Nvfp4MlpGateUpGeometry::kOutputRows) * tokens * sizeof(float);
     return projected + nvfp4_cutlass_sm70_workspace_bytes(
                            Nvfp4MlpGateUpGeometry::kOutputRows,
-                           Nvfp4MlpGateUpGeometry::kInputRows, tokens);
+                           Nvfp4MlpGateUpGeometry::kInputRows, tokens, DType::FP32);
 }
 #endif // NINFER_VOLTA_BUILD
 
@@ -238,11 +238,9 @@ void nvfp4_linear_swiglu_dispatch(const Tensor& x, const Weight& weight, Tensor&
     case Nvfp4LinearSwiGluRoute::VoltaCutlass: {
         auto scope = workspace.scope();
         Tensor projected = workspace.alloc(
-            DType::BF16, {Nvfp4MlpGateUpGeometry::kOutputRows, x.ne[1]}, 256);
+            DType::FP32, {Nvfp4MlpGateUpGeometry::kOutputRows, x.ne[1]}, 256);
         nvfp4_cutlass_sm70_launch(x, weight, projected, workspace, stream);
-        constexpr std::int32_t kIntermediate = Nvfp4MlpGateUpGeometry::kOutputRows / 2;
-        silu_mul(projected.slice(0, 0, kIntermediate),
-                 projected.slice(0, kIntermediate, kIntermediate), out, stream);
+        nvfp4_linear_swiglu_fp32_projected_combine(projected, out, stream);
         return;
     }
 #endif

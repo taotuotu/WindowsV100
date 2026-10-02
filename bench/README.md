@@ -17,6 +17,24 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DNINFER_BUILD_BENCHMARKS=ON
 cmake --build build --parallel --target ninfer_bench
 ```
 
+On Windows / V100, first configure the CUDA 12.9 build with the product build script, then enable
+the benchmark in that build directory:
+
+```powershell
+.\scripts\build-windows-v100.ps1
+cmake -S . -B build-win-v100 -DNINFER_BUILD_BENCHMARKS=ON
+cmake --build build-win-v100 --config Release --parallel --target ninfer_bench
+.\build-win-v100\bench\Release\ninfer_bench.exe --weights 'D:\models\model.ninfer' `
+  --device 1 --spec mtp --draft-tokens 3 --lm-head-draft --kv-dtype int8 `
+  --max-ctx 246000 --prefill-chunk 2048 -p 8192,16384 -r 3 --warmup 1 -o json `
+  --output-file prefill.json
+```
+
+Use the actual model path and GPU index. The example matches the cold-prefill measurement in
+[`../docs/windows-performance.md`](../docs/windows-performance.md); its capacity and KV settings
+are measurement settings, not launcher defaults. Stop the serving process before measuring on
+the same GPU. Windows `ninfer_bench` is text-only and does not load the Vision encoder.
+
 ## Product benchmark
 
 The benchmark slices exact token counts from `bench/fixtures/bench_corpus.ids`, calls
@@ -33,7 +51,8 @@ The matrix contains three independently measured test kinds:
 - `pp{P}+tg{G}` uses the same `G+1` convention after a `P`-token prefill and reports both phase
   rates from the same generation call.
 
-All benchmark requests use raw output, disable model-default stops, and disable prefix reuse. This
+All benchmark requests use raw output, disable model-default stops, and disable prefix reuse. Each
+repetition rejects a nonzero reused-token count or a prompt count different from its corpus slice. This
 keeps the requested token count exact without adding another generation path. When CUDA Graph is
 enabled and the matrix contains decode work, one ordinary public generation request primes the
 decode graph before warmups and measured repetitions.

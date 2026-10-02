@@ -10,11 +10,22 @@ int main() {
 
     try {
         constexpr std::array<std::int32_t, 4> kA16Cases{1, 4, 8, 16};
+#ifdef NINFER_VOLTA_BUILD
+        constexpr std::array<std::int32_t, 3> kWideA16Cases{33, 64, 128};
+#endif
         constexpr std::array<std::int32_t, 6> kA4Cases{5, 48, 49, 128, 256, 1024};
         int failures = 0;
         failures += run_profile("LinearSwiGLU NVFP4_A16",
                                 {QType::NVFP4, 34816, 5120, 17408, 1801U, ActivationCompute::A16},
                                 kA16Cases);
+#ifdef NINFER_VOLTA_BUILD
+        const Profile wide_a16{QType::NVFP4, 34816, 5120, 17408, 1801U,
+                               ActivationCompute::A16};
+        failures += run_profile("LinearSwiGLU NVFP4_A16 wide native", wide_a16,
+                                kWideA16Cases);
+        failures += run_profile("LinearSwiGLU NVFP4_A16 wide QPN", wide_a16,
+                                kWideA16Cases, {}, true);
+#endif
 #ifndef NINFER_VOLTA_BUILD
         failures +=
             run_profile("LinearSwiGLU NVFP4_A4",

@@ -60,6 +60,9 @@ constexpr std::array<std::byte, 8> kSnapshotEndMagic = {
 };
 constexpr std::string_view kOwnedPrefix = "ninfer-session-cache-";
 constexpr std::uint32_t kStoreFormatVersion = 2;
+// Wide Volta NVFP4 SwiGLU now preserves FP32 gate/up before its final BF16 cast.
+// Keep the framing unchanged while isolating continuations computed by older mathematics.
+constexpr std::uint32_t kEngineMathRevision = 1;
 constexpr std::size_t kSnapshotHeaderBytes = 16U * 1024U;
 constexpr std::size_t kSnapshotPrefixBytes = 8U + sizeof(std::uint32_t) * 2U + Digest{}.size();
 constexpr std::size_t kSnapshotFooterBytes = 8U + sizeof(std::uint64_t) + Digest{}.size();
@@ -1108,6 +1111,7 @@ private:
         std::vector<std::byte> material;
         material.reserve(identity_.model_id.size() + identity_.weights_id.size() + 64U);
         append_u32(material, kStoreFormatVersion);
+        append_u32(material, kEngineMathRevision);
         append_string(material, identity_.model_id);
         append_string(material, identity_.weights_id);
         material.insert(material.end(), artifact_digest_.begin(), artifact_digest_.end());

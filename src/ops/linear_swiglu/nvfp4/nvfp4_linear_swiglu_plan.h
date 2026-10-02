@@ -32,6 +32,8 @@ void nvfp4_linear_swiglu_qpn_split_launch(const Tensor& x, const Weight& weight,
                                           void* activation_scratch,
                                           cudaStream_t stream);
 [[nodiscard]] bool nvfp4_linear_swiglu_qpn_split_supported(std::int32_t k, std::int32_t t) noexcept;
+void nvfp4_linear_swiglu_fp32_projected_combine(const Tensor& projected, Tensor& out,
+                                                cudaStream_t stream);
 #endif
 
 void nvfp4_linear_swiglu_dispatch(const Tensor& x, const Weight& weight, Tensor& out,

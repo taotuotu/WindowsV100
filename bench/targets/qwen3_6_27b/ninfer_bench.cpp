@@ -80,6 +80,11 @@ ninfer::bench::RepTiming run_repetition(ninfer::Engine& engine,
     ninfer::GenerationResult generated =
         engine.generate(std::move(prompt), benchmark_request(test));
 
+    if (generated.reused_prompt_tokens != 0 ||
+        generated.prompt.prompt_tokens != static_cast<std::uint32_t>(prompt_tokens)) {
+        throw std::runtime_error(test.label + " did not compute the complete uncached prompt");
+    }
+
     const std::uint32_t expected = test.requested_output_tokens();
     if (generated.generated_token_ids.size() != expected) {
         throw std::runtime_error(test.label + " generated " +

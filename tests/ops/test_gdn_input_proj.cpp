@@ -288,11 +288,12 @@ int run_fp8() {
     constexpr std::int32_t kRows   = 16384;
     DevicePackedWeight parent(
         quantized_weight::make_patterned_weight(QType::FP8_E4M3FN_ROW_BF16S, kRows, kHidden, 613U));
+    int failures = 0;
 #ifdef NINFER_VOLTA_BUILD
+    failures += run_fp8_case(parent, 33, ops::LinearPolicy::A16Only);
     parent.prepack_fp8();
 #endif
 
-    int failures = 0;
 #ifndef NINFER_VOLTA_BUILD
     const std::size_t one = ops::gdn_input_proj_workspace_capacity_bytes(
         QType::FP8_E4M3FN_ROW_BF16S, kRows, kHidden, ops::LinearPolicy::AllowA8, 1, 1);
@@ -321,6 +322,9 @@ int run_fp8() {
     for (const std::int32_t tokens : {1, 2, 7, 8, 48, 65, 1024}) {
         failures += run_fp8_case(parent, tokens, ops::LinearPolicy::AllowA8);
     }
+#else
+    // This goes through the same wide FP8 CUTLASS projection as Qwen3.8's GDN prefill path.
+    failures += run_fp8_case(parent, 33, ops::LinearPolicy::A16Only);
 #endif
     return failures;
 }

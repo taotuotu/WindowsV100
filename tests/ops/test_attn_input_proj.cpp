@@ -335,7 +335,11 @@ int run_fp8_target_case(DevicePackedWeight& parent, std::int32_t tokens, ops::Li
     Tensor g = gate.tensor();
     Tensor k = key.tensor();
     Tensor v = value.tensor();
-    if (policy == ops::LinearPolicy::A16Only) {
+    if (policy == ops::LinearPolicy::A16Only
+#ifdef NINFER_VOLTA_BUILD
+        && tokens <= 32
+#endif
+    ) {
         ops::attn_input_proj(x, parent.view(), q, g, k, v, nullptr);
     } else {
         const std::size_t capacity = ops::attn_input_proj_workspace_capacity_bytes(
@@ -373,11 +377,12 @@ int run_fp8_target() {
     constexpr std::int32_t kRows   = 14336;
     DevicePackedWeight parent(
         quantized_weight::make_patterned_weight(QType::FP8_E4M3FN_ROW_BF16S, kRows, kHidden, 349U));
+    int failures = 0;
 #ifdef NINFER_VOLTA_BUILD
+    failures += run_fp8_target_case(parent, 33, ops::LinearPolicy::A16Only);
     parent.prepack_fp8();
 #endif
 
-    int failures = 0;
 #ifndef NINFER_VOLTA_BUILD
     const std::size_t one = ops::attn_input_proj_workspace_capacity_bytes(
         QType::FP8_E4M3FN_ROW_BF16S, kRows, kHidden, ops::LinearPolicy::AllowA8, 1, 1);
@@ -401,6 +406,13 @@ int run_fp8_target() {
 #endif
     failures += run_fp8_target_case(parent, 1, ops::LinearPolicy::A16Only);
     failures += run_fp8_target_case(parent, 2, ops::LinearPolicy::A16Only);
+#ifdef NINFER_VOLTA_BUILD
+    // Exercise the wide FP8 CUTLASS path at its dispatch boundary and across a partial 32-token
+    // tail. The FP64 row-scaled oracle in run_fp8_target_case is independent of the CUDA
+    // implementation.
+    failures += run_fp8_target_case(parent, 33, ops::LinearPolicy::A16Only);
+    failures += run_fp8_target_case(parent, 65, ops::LinearPolicy::A16Only);
+#endif
 #ifndef NINFER_VOLTA_BUILD
     for (const std::int32_t tokens : {1, 2, 10, 11, 48, 65, 1024}) {
         failures += run_fp8_target_case(parent, tokens, ops::LinearPolicy::AllowA8);

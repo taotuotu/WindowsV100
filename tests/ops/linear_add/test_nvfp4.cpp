@@ -3,6 +3,9 @@
 
 #include "ops/op_tester.h"
 #include "ops/quantized_weight.h"
+#ifdef NINFER_VOLTA_BUILD
+#include "ops/linear/nvfp4/nvfp4_prepack_sm70.h"
+#endif
 
 #include <cuda_runtime.h>
 
@@ -31,6 +34,7 @@ constexpr ReductionCriterion kA4Tolerance{0.16, kBf16UnitRoundoff, 0.16};
 struct Invocation {
     std::int32_t tokens;
     ops::LinearPolicy policy;
+    bool qpn_prepacked = false;
 };
 
 std::vector<std::int32_t> sampled_indices(std::int32_t extent) {
@@ -92,6 +96,12 @@ int run_shape(std::int32_t n, std::int32_t k, std::uint32_t seed) {
     const std::array invocations{
         Invocation{1, ops::LinearPolicy::A16Only},
         Invocation{4, ops::LinearPolicy::A16Only},
+        Invocation{33, ops::LinearPolicy::A16Only},
+        Invocation{64, ops::LinearPolicy::A16Only},
+        Invocation{128, ops::LinearPolicy::A16Only},
+        Invocation{33, ops::LinearPolicy::A16Only, true},
+        Invocation{64, ops::LinearPolicy::A16Only, true},
+        Invocation{128, ops::LinearPolicy::A16Only, true},
     };
 #else
     const std::int32_t first_a4 = k == 6144 ? 7 : 8;
@@ -126,10 +136,23 @@ int run_shape(std::int32_t n, std::int32_t k, std::uint32_t seed) {
     device_activation.copy_from_host(activation.data(), device_activation.bytes());
     GuardedDeviceBuffer device_weight(host_weight.payload.size());
     device_weight.copy_from_host(host_weight.payload.data(), host_weight.payload.size());
-    const Weight weight = host_weight.device_weight(device_weight.data());
+    const Weight native_weight = host_weight.device_weight(device_weight.data());
+#ifdef NINFER_VOLTA_BUILD
+    GuardedDeviceBuffer device_weight_qpn(host_weight.payload.size());
+    device_weight_qpn.copy_from_host(host_weight.payload.data(), host_weight.payload.size());
+    Weight qpn_weight = host_weight.device_weight(device_weight_qpn.data());
+    ops::detail::nvfp4_prepack_qpn_sm70(qpn_weight);
+    std::vector<std::uint8_t> expected_qpn_weight(host_weight.payload.size());
+    device_weight_qpn.copy_to_host(expected_qpn_weight.data(), expected_qpn_weight.size());
+#endif
 
     int failures = 0;
     for (const Invocation invocation : invocations) {
+#ifdef NINFER_VOLTA_BUILD
+        const Weight& weight = invocation.qpn_prepacked ? qpn_weight : native_weight;
+#else
+        const Weight& weight = native_weight;
+#endif
         const std::size_t output_words = static_cast<std::size_t>(n) * invocation.tokens;
         GuardedDeviceBuffer output(output_words * sizeof(std::uint16_t));
         output.copy_from_host(initial_residual.data(), output.bytes());
@@ -164,6 +187,7 @@ int run_shape(std::int32_t n, std::int32_t k, std::uint32_t seed) {
         const bool a4           = invocation.policy == ops::LinearPolicy::AllowA4;
         const std::string label = "NVFP4 linear_add [" + std::to_string(n) + "," +
                                   std::to_string(k) + "] " + (a4 ? "A4" : "A16") +
+                                  (invocation.qpn_prepacked ? " QPN" : " native") +
                                   " T=" + std::to_string(invocation.tokens);
         if (workspace.peak_used() != capacity) {
             std::cerr << label << ": workspace query/execution high-water mismatch\n";
@@ -200,12 +224,19 @@ int run_shape(std::int32_t n, std::int32_t k, std::uint32_t seed) {
 
     failures += device_activation.verify_guards("NVFP4 linear_add activation");
     failures += device_weight.verify_guards("NVFP4 linear_add weight");
+#ifdef NINFER_VOLTA_BUILD
+    failures += device_weight_qpn.verify_guards("NVFP4 linear_add QPN weight");
+#endif
     failures += verify_preserved(
         device_activation,
         std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(activation.data()),
                                       activation.size() * sizeof(std::uint16_t)),
         "NVFP4 linear_add activation");
     failures += verify_preserved(device_weight, host_weight.payload, "NVFP4 linear_add weight");
+#ifdef NINFER_VOLTA_BUILD
+    failures += verify_preserved(device_weight_qpn, expected_qpn_weight,
+                                 "NVFP4 linear_add QPN weight");
+#endif
     return failures;
 }
 

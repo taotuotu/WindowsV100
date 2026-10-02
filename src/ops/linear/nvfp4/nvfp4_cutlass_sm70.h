@@ -11,7 +11,8 @@
 namespace ninfer::ops::detail {
 
 [[nodiscard]] std::size_t nvfp4_cutlass_sm70_workspace_bytes(std::int32_t n, std::int32_t k,
-                                                              std::int32_t cols);
+                                                              std::int32_t cols,
+                                                              DType output_dtype = DType::BF16);
 void nvfp4_cutlass_sm70_launch(const Tensor& x, const Weight& w, Tensor& out, WorkspaceArena& ws,
                                cudaStream_t stream);
 

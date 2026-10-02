@@ -7,6 +7,9 @@
 #include "ops/op_tester.h"
 #include "ops/quantized_weight.h"
 #include "ops/linear/fp8/fp8_prepack_sm70.h"
+#ifdef NINFER_VOLTA_BUILD
+#include "ops/linear/nvfp4/nvfp4_prepack_sm70.h"
+#endif
 
 #include <cuda_runtime.h>
 
@@ -247,8 +250,11 @@ void validate_profile(const Profile& profile) {
 
 int run_profile(std::string_view label, const Profile& profile,
                 std::span<const std::int32_t> token_cases,
-                std::span<const std::int32_t> graph_cases) {
+                std::span<const std::int32_t> graph_cases, bool prepack_nvfp4_qpn) {
     validate_profile(profile);
+    if (prepack_nvfp4_qpn && profile.qtype != QType::NVFP4) {
+        throw std::invalid_argument("linear_swiglu test: QPN prepack is only valid for NVFP4");
+    }
     if (token_cases.empty()) { throw std::invalid_argument("linear_swiglu test: no token cases"); }
     if (!cuda_available()) {
         std::cout << "SKIP: no usable CUDA device\n";
@@ -296,6 +302,14 @@ int run_profile(std::string_view label, const Profile& profile,
     if (profile.qtype == QType::FP8_E4M3FN_ROW_BF16S) {
         ops::detail::fp8_prepack_qpn_sm70(weight);
         device_weight.copy_to_host(expected_weight.data(), expected_weight.size());
+    }
+    if (prepack_nvfp4_qpn) {
+        ops::detail::nvfp4_prepack_qpn_sm70(weight);
+        device_weight.copy_to_host(expected_weight.data(), expected_weight.size());
+    }
+#else
+    if (prepack_nvfp4_qpn) {
+        throw std::invalid_argument("linear_swiglu test: NVFP4 QPN prepack requires Volta");
     }
 #endif
 

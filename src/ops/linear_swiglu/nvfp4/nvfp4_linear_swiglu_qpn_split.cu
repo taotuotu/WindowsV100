@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <stdexcept>
 
 namespace ninfer::ops::detail {
 
@@ -20,6 +21,23 @@ __global__ void bf16_to_fp16_kernel(const __nv_bfloat16* __restrict__ input,
                                     half* __restrict__ output, std::int64_t count) {
     const std::int64_t i = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i < count) { output[i] = __float2half(__bfloat162float(input[i])); }
+}
+
+// CUTLASS writes [token, gate_rows + up_rows], rather than the two separate planes used
+// by the narrow QPN split route. Preserve both FP32 projections until the final BF16 cast.
+__global__ void projected_fp32_combine_kernel(const float* __restrict__ projected,
+                                              __nv_bfloat16* __restrict__ output,
+                                              std::int64_t elements) {
+    const std::int64_t start =
+        static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const std::int64_t stride = static_cast<std::int64_t>(gridDim.x) * blockDim.x;
+    for (std::int64_t i = start; i < elements; i += stride) {
+        const std::int64_t token = i / kIntermediate;
+        const std::int64_t row = i - token * kIntermediate;
+        const std::int64_t source = token * (2 * kIntermediate) + row;
+        output[i] = __float2bfloat16_rn(
+            silu(projected[source]) * projected[source + kIntermediate]);
+    }
 }
 } // namespace
 
@@ -61,6 +79,26 @@ void nvfp4_linear_swiglu_qpn_split_launch(const Tensor& x, const Weight& weight,
     const int blocks = static_cast<int>(std::min<std::int64_t>((elements + threads - 1) / threads, 4096));
     nvfp4_swiglu_fp32_combine_kernel<<<blocks, threads, 0, stream>>>(
         gate_scratch, up_scratch, static_cast<__nv_bfloat16*>(out.data), elements);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void nvfp4_linear_swiglu_fp32_projected_combine(const Tensor& projected, Tensor& out,
+                                                cudaStream_t stream) {
+    if (projected.dtype != DType::FP32 || out.dtype != DType::BF16 ||
+        out.ne[0] != kIntermediate || projected.ne[0] != 2 * kIntermediate ||
+        projected.ne[1] != out.ne[1] ||
+        !projected.is_contiguous() || !out.is_contiguous()) {
+        throw std::invalid_argument("NVFP4 SwiGLU FP32 projected combine: invalid tensors");
+    }
+    const std::int32_t intermediate = out.ne[0];
+    const std::int32_t tokens = out.ne[1];
+    const std::int64_t elements = static_cast<std::int64_t>(intermediate) * tokens;
+    const auto* projected_values = static_cast<const float*>(projected.data);
+    constexpr int threads = 256;
+    const int blocks = static_cast<int>(std::min<std::int64_t>(
+        (elements + threads - 1) / threads, 4096));
+    projected_fp32_combine_kernel<<<blocks, threads, 0, stream>>>(
+        projected_values, static_cast<__nv_bfloat16*>(out.data), elements);
     CUDA_CHECK(cudaGetLastError());
 }
 

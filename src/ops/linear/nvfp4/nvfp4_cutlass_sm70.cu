@@ -96,8 +96,8 @@ __global__ void dequant_nvfp4_qpn_to_fp16(const std::uint8_t* __restrict__ codes
                                           const std::uint8_t* __restrict__ scales, int n, int k,
                                           float inverse_weight_divisor,
                                           cutlass::half_t* __restrict__ out) {
-    const int row      = static_cast<int>(blockIdx.y);
-    const int segment  = static_cast<int>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const int row = static_cast<int>(blockIdx.y);
+    const int segment = static_cast<int>(blockIdx.x) * blockDim.x + threadIdx.x;
     const int segments_per_row = k / 8;
     if (row >= n || segment >= segments_per_row) { return; }
 
@@ -134,7 +134,8 @@ using ElementAccumulator     = float;
 using ElementComputeEpilogue = ElementAccumulator;
 using ElementInputA          = cutlass::half_t;
 using ElementInputB          = cutlass::half_t;
-using ElementOutput          = cutlass::bfloat16_t;
+using ElementOutputBF16       = cutlass::bfloat16_t;
+using ElementOutputFP32       = float;
 using LayoutInputA           = cutlass::layout::RowMajor;
 using LayoutInputB           = cutlass::layout::ColumnMajor;
 using LayoutOutput           = cutlass::layout::RowMajor;
@@ -144,14 +145,18 @@ using ShapeMMAThreadBlock    = cutlass::gemm::GemmShape<128, 128, 32>;
 using ShapeMMAWarp           = cutlass::gemm::GemmShape<64, 64, 32>;
 using ShapeMMAOp             = cutlass::gemm::GemmShape<8, 8, 4>;
 using SwizzleThreadBlock = cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>;
-using EpilogueOp = cutlass::epilogue::thread::LinearCombination<
-    ElementOutput, 128 / cutlass::sizeof_bits<ElementOutput>::value, ElementAccumulator,
-    ElementComputeEpilogue>;
 constexpr int kNumStages = 2;
-using Gemm = cutlass::gemm::device::Gemm<ElementInputA, LayoutInputA, ElementInputB, LayoutInputB,
-                                         ElementOutput, LayoutOutput, ElementAccumulator, MMAOp,
-                                         SmArch, ShapeMMAThreadBlock, ShapeMMAWarp, ShapeMMAOp,
-                                         EpilogueOp, SwizzleThreadBlock, kNumStages>;
+template <class Output>
+using EpilogueOpFor = cutlass::epilogue::thread::LinearCombination<
+    Output, 128 / cutlass::sizeof_bits<Output>::value, ElementAccumulator,
+    ElementComputeEpilogue>;
+template <class Output>
+using GemmForOutput = cutlass::gemm::device::Gemm<
+    ElementInputA, LayoutInputA, ElementInputB, LayoutInputB, Output, LayoutOutput,
+    ElementAccumulator, MMAOp, SmArch, ShapeMMAThreadBlock, ShapeMMAWarp, ShapeMMAOp,
+    EpilogueOpFor<Output>, SwizzleThreadBlock, kNumStages>;
+using GemmBF16 = GemmForOutput<ElementOutputBF16>;
+using GemmFP32 = GemmForOutput<ElementOutputFP32>;
 
 template <class Allocator>
 struct CutlassWorkspace {
@@ -173,32 +178,71 @@ CutlassWorkspace<Allocator> allocate_cutlass_workspace(Allocator& allocator, std
 
 } // namespace
 
-std::size_t nvfp4_cutlass_sm70_workspace_bytes(std::int32_t n, std::int32_t k,
-                                               std::int32_t cols) {
-    WorkspaceLayoutBuilder layout;
+template <class GemmType>
+std::size_t cutlass_gemm_workspace_bytes(std::int32_t n, std::int32_t k, std::int32_t cols) {
     cutlass::gemm::GemmCoord problem_size(cols, n, k);
-    typename Gemm::Arguments arguments{
+    typename GemmType::Arguments arguments{
         problem_size, {nullptr, k}, {nullptr, k}, {nullptr, n}, {nullptr, n},
         {ElementComputeEpilogue(1), ElementComputeEpilogue(0)}, 1};
-    const std::size_t gemm_workspace_bytes = Gemm::get_workspace_size(arguments);
-    (void)allocate_cutlass_workspace(layout, n, k, cols, gemm_workspace_bytes);
+    return GemmType::get_workspace_size(arguments);
+}
+
+template <class GemmType>
+std::size_t cutlass_workspace_bytes(std::int32_t n, std::int32_t k, std::int32_t cols) {
+    WorkspaceLayoutBuilder layout;
+    (void)allocate_cutlass_workspace(layout, n, k, cols,
+                                     cutlass_gemm_workspace_bytes<GemmType>(n, k, cols));
     return layout.peak_bytes(1);
+}
+
+std::size_t nvfp4_cutlass_sm70_workspace_bytes(std::int32_t n, std::int32_t k,
+                                               std::int32_t cols, DType output_dtype) {
+    if (output_dtype == DType::BF16) { return cutlass_workspace_bytes<GemmBF16>(n, k, cols); }
+    if (output_dtype == DType::FP32) { return cutlass_workspace_bytes<GemmFP32>(n, k, cols); }
+    throw std::invalid_argument("nvfp4_cutlass_sm70: output must be BF16 or FP32");
+}
+
+template <class GemmType, class Output>
+void launch_cutlass_gemm(const cutlass::gemm::GemmCoord& problem_size, Tensor& out,
+                         std::int32_t n, std::int32_t k, cutlass::half_t* x_fp16,
+                         cutlass::half_t* w_fp16,
+                         DeviceSpan workspace, cudaStream_t stream) {
+    GemmType gemm_op;
+    typename GemmType::Arguments arguments{
+        problem_size, {x_fp16, k}, {w_fp16, k}, {static_cast<Output*>(out.data), n},
+        {static_cast<Output*>(out.data), n},
+        {ElementComputeEpilogue(1), ElementComputeEpilogue(0)}, 1};
+    cutlass::Status status = gemm_op.can_implement(arguments);
+    if (status != cutlass::Status::kSuccess) {
+        throw std::runtime_error("nvfp4_cutlass_sm70: CUTLASS can_implement failed");
+    }
+    status = gemm_op.initialize(arguments, workspace.data, stream);
+    if (status != cutlass::Status::kSuccess) {
+        throw std::runtime_error("nvfp4_cutlass_sm70: CUTLASS initialize failed");
+    }
+    status = gemm_op(stream);
+    if (status != cutlass::Status::kSuccess) {
+        throw std::runtime_error("nvfp4_cutlass_sm70: CUTLASS gemm() failed");
+    }
+    CUDA_CHECK(cudaGetLastError());
 }
 
 void nvfp4_cutlass_sm70_launch(const Tensor& x, const Weight& w, Tensor& out, WorkspaceArena& ws,
                                cudaStream_t stream) {
+    if (out.dtype != DType::BF16 && out.dtype != DType::FP32) {
+        throw std::invalid_argument("nvfp4_cutlass_sm70: output must be BF16 or FP32");
+    }
     const std::int32_t k    = x.ne[0];
     const std::int32_t cols = x.ne[1];
     const std::int32_t n    = w.n;
     cutlass::gemm::GemmCoord problem_size(cols, n, k);
-    typename Gemm::Arguments sizing_arguments{
-        problem_size, {nullptr, k}, {nullptr, k}, {nullptr, n}, {nullptr, n},
-        {ElementComputeEpilogue(1), ElementComputeEpilogue(0)}, 1};
-    const std::size_t gemm_workspace_bytes = Gemm::get_workspace_size(sizing_arguments);
+    const std::size_t gemm_scratch_bytes = out.dtype == DType::FP32
+        ? cutlass_gemm_workspace_bytes<GemmFP32>(n, k, cols)
+        : cutlass_gemm_workspace_bytes<GemmBF16>(n, k, cols);
 
     auto scratch_scope = ws.scope();
     CutlassWorkspace<WorkspaceArena> scratch =
-        allocate_cutlass_workspace(ws, n, k, cols, gemm_workspace_bytes);
+        allocate_cutlass_workspace(ws, n, k, cols, gemm_scratch_bytes);
     auto* w_fp16 = static_cast<cutlass::half_t*>(scratch.w_fp16.data);
     auto* x_fp16 = static_cast<cutlass::half_t*>(scratch.x_fp16.data);
 
@@ -226,24 +270,13 @@ void nvfp4_cutlass_sm70_launch(const Tensor& x, const Weight& w, Tensor& out, Wo
                                                       x_fp16, x_count);
     CUDA_CHECK(cudaGetLastError());
 
-    Gemm gemm_op;
-    typename Gemm::Arguments arguments{
-        problem_size, {x_fp16, k}, {w_fp16, k}, {static_cast<ElementOutput*>(out.data), n},
-        {static_cast<ElementOutput*>(out.data), n},
-        {ElementComputeEpilogue(1), ElementComputeEpilogue(0)}, 1};
-    cutlass::Status status = gemm_op.can_implement(arguments);
-    if (status != cutlass::Status::kSuccess) {
-        throw std::runtime_error("nvfp4_cutlass_sm70: CUTLASS can_implement failed");
+    if (out.dtype == DType::FP32) {
+        launch_cutlass_gemm<GemmFP32, float>(problem_size, out, n, k, x_fp16, w_fp16,
+                                             scratch.gemm_workspace, stream);
+    } else {
+        launch_cutlass_gemm<GemmBF16, cutlass::bfloat16_t>(
+            problem_size, out, n, k, x_fp16, w_fp16, scratch.gemm_workspace, stream);
     }
-    status = gemm_op.initialize(arguments, scratch.gemm_workspace.data, stream);
-    if (status != cutlass::Status::kSuccess) {
-        throw std::runtime_error("nvfp4_cutlass_sm70: CUTLASS initialize failed");
-    }
-    status = gemm_op(stream);
-    if (status != cutlass::Status::kSuccess) {
-        throw std::runtime_error("nvfp4_cutlass_sm70: CUTLASS gemm() failed");
-    }
-    CUDA_CHECK(cudaGetLastError());
 }
 
 } // namespace ninfer::ops::detail

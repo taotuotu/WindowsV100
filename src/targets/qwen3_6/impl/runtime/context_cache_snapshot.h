@@ -17,7 +17,8 @@
 namespace ninfer::targets::qwen3_6::detail::context_cache_snapshot {
 
 inline constexpr std::uint32_t kOwnerRecordMagic = 0x31534351U; // QSC1, little endian
-inline constexpr std::uint32_t kOwnerRecordVersion = 3;
+// v4 rejects states computed with the former BF16-rounded wide NVFP4 SwiGLU projection.
+inline constexpr std::uint32_t kOwnerRecordVersion = 4;
 inline constexpr std::size_t kMetadataChunkBytes = 64U << 10;
 inline constexpr std::uint64_t kMaximumVisionItems = 1U << 16;
 inline constexpr std::uint64_t kMaximumVisionSpans = 1U << 20;
