@@ -21,11 +21,15 @@ entering an optional API key; API requests still use the configured authenticati
 uses the existing Chat Completions stream with `timings_per_token`, `return_progress`, and usage
 enabled. It displays server decode timing separately from client time to first text and keeps chat
 history only in browser page memory. Its “preserve history reasoning” checkbox defaults on and
-sends `preserve_thinking=true`; turning it off removes non-empty historical reasoning and can
-require replaying a larger prompt suffix. External clients that include actual historical thought
-should return it as `reasoning_content` and send `preserve_thinking=true`, or launch with
-`--preserve-thinking`. The general server default remains false. Source and launch instructions
-are in the Windows guide.
+sends `preserve_thinking=true`. The Windows launcher also enables preservation by default when a
+request omits the field; an explicit `preserve_thinking=false` overrides it. The generic
+`ninfer-serve` default remains false unless launched with `--preserve-thinking`. Turning preservation
+off removes non-empty historical reasoning from later rendered prompts and can require replaying a
+larger prompt suffix. External agents must return the full actual assistant `reasoning_content` on
+every turn that carries that history; the server cannot restore reasoning omitted from the client
+history. When an existing session switches from preservation off to on, its first request may need
+to recompute affected history and capture a new stable checkpoint; later turns can reuse it when the
+history matches exactly. Source and launch instructions are in the Windows guide.
 
 `GET /ui/model-info` is a Windows UI metadata endpoint, protected by the configured API key. It
 reports the resident Engine's canonical model/weights IDs, artifact basename, KV storage,
@@ -288,9 +292,10 @@ select the corresponding template effort when available. The other OpenAI protoc
 `reasoning_effort` returns `conflicting_template_option`.
 
 `preserve_thinking` controls whether reasoning from closed assistant turns remains in later
-prompts. It defaults to the server setting, which is off unless `--preserve-thinking` is used. If
-both OpenAI spellings are present they must carry the same boolean value. Unknown non-null
-`chat_template_kwargs` are rejected.
+prompts. It defaults to the effective server setting: generic `ninfer-serve` defaults off unless
+`--preserve-thinking` is used, while the Windows launcher enables it by default. An explicit request
+boolean overrides the service default. If both OpenAI spellings are present they must carry the same
+boolean value. Unknown non-null `chat_template_kwargs` are rejected.
 
 Streaming begins with an assistant-role chunk, sends separate reasoning and content deltas, then a
 finish-reason chunk and `[DONE]`. When `stream_options.include_usage` is true, a final empty
@@ -819,7 +824,9 @@ curl http://127.0.0.1:8080/v1/models \
 
 ## Server options
 
-The table lists executable defaults. The startup example selects a long-context FP8/MTP3 profile.
+The table lists generic `ninfer-serve` executable defaults; the Windows launcher separately enables
+`--preserve-thinking` by default as described above. The startup example selects a long-context
+FP8/MTP3 profile.
 
 | Option | Meaning | Default |
 |---|---|---:|
@@ -914,7 +921,7 @@ in append mode and flushes every event, so successive model or MTP blocks may sh
 file. The parent directory must already exist. Failure to open the file aborts startup; the log path
 is also rejected if it resolves to the model artifact.
 
-Every line is one `ninfer_serve_request_log` schema-v21 JSON object. All events carry
+Every line is one `ninfer_serve_request_log` schema-v22 JSON object. All events carry
 `timestamp_unix_ms` and a process-unique `server_instance_id`; request IDs are monotonic only within
 that server instance. Successful request-start records include request-scoped acquisition,
 media-preprocessing wall/work, tokenizer, cache hit/miss/single-flight, and payload-size fields;
@@ -923,8 +930,8 @@ they do not infer request behavior from process-global counter deltas.
 | Event | Contents |
 |---|---|
 | `server_start` | target/weights identity and artifact, resolved Engine and context-cache capacities, registered thinking/non-thinking sampler defaults plus process overrides, thinking-history and thinking-budget defaults, Device arenas, the optional non-additive Vision layout inside the unified workspace, Host State/KV capacity and occupancy, KV sizing ledger, CUDA Graph allowance, CUDA/GPU environment, and redacted argv |
-| `request_start` | protocol, resolved sampler and seed, requested and effective reasoning effort, thinking mode and optional budget, Responses semantic-change flag, output budget, stream/message/tool shape |
-| `request_rejected` | parsed request shape, requested reasoning effort with unresolved effective value, media-item count, `phase: "prepare"`, and the exact HTTP status/type/code/parameter/message for a synchronous preparation rejection |
+| `request_start` | protocol, resolved sampler and seed, requested and effective reasoning effort, requested preservation setting and structured reasoning-history counts, thinking mode and optional budget, Responses semantic-change flag, output budget, stream/message/tool shape |
+| `request_rejected` | parsed request shape, requested reasoning effort (effective value unresolved), normalized preservation setting, structured reasoning-history counts, media-item count, `phase: "prepare"`, and the exact HTTP status/type/code/parameter/message for a synchronous preparation rejection |
 | `request_done` | finish reason, prompt/completion/cache/computed-prefill tokens, prefix reuse path, tool-call parse diagnostics, request-owned materialization cost/search diagnostics, thinking-budget application counters, unrounded request-stage seconds, per-request Engine Host exposure, and complete speculative-decoding counters |
 | `request_error` | the resolved request configuration and the generation, cancellation, or pre-outcome transport terminal message |
 | `throughput` | interval token/decode/context-cache pressure counter deltas, authoritative worker Host-work deltas, current scheduler/resource gauges, and decode-round batch statistics |
@@ -933,6 +940,13 @@ they do not infer request behavior from process-global counter deltas.
 `resolved_reasoning_effort` is `none`, a native effort tier, or `null` when thinking is enabled but
 the template has no tiered default. A preparation rejection always leaves the resolved field
 `null`.
+
+In the `request` object, `requested_preserve_thinking` is the nullable normalized
+`GenerationRequest` setting. A Responses request may inherit this value from its parent, so it
+does not necessarily identify a field present in the current HTTP payload. `reasoning_history_messages`
+and `reasoning_history_bytes` count only non-empty assistant `reasoning_content` fields and their
+UTF-8 byte length; they do not count inline `<think>` text inside `content`. These anonymous counts
+contain no reasoning text, and zero counts do not establish that inline thinking is absent.
 
 `request_done.result.tool_call_parse` records whether a complete marker was seen, the structured
 call count, empty non-string arguments omitted during normalization, schema-mismatched arguments

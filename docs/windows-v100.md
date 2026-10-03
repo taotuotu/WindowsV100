@@ -75,7 +75,7 @@ MTP6 / prefill2048 / 143600；其它电脑需按实际空闲显存选择容量�
 | 前缀缓存 | 开启；当前会话独占；额外 Device State 1、Host State 8、Host KV 0 |
 | 磁盘会话缓存 | 默认开启；`.local/context-cache`；磁盘预算32GiB、最多8个会话；Host 捕获峰值另限32GiB |
 | 活动请求 | 生成/捕获期间1；第二个请求返回429/`inference_busy`；背景磁盘写入期间可发下一轮 |
-| 思考与采样 | 默认启用模型原生思考，未指定挡位时采用模板默认 `xhigh`；temperature 0.7、seed 123；请求可覆盖 |
+| 思考与采样 | 默认启用模型原生思考，未指定挡位时采用模板默认 `xhigh`；闭合轮次历史思考默认保留（`preserve_thinking=true`）；temperature 0.7、seed 123；请求可覆盖 |
 
 网页默认勾选“启用思考模式”，不额外指定 `reasoning_effort` 或思考 token 预算，沿用模型模板的原生默认。外部 Agent 未传思考设置时也默认启用；显式传入 `reasoning_effort: "none"` 或 `enable_thinking: false` 可关闭。原生启动参数 `--no-thinking` 可关闭服务默认思考。思考与正文仍共用请求的输出 token 上限。
 
@@ -145,7 +145,7 @@ Program owner archive采用revision4，文件外层格式仍为v2。升级后每
 重新Prefill；之后保存和复用新版本状态。旧快照文件不在升级时批量删除，仍受原磁盘预算和淘汰策略管理；
 浏览器及外部客户端的聊天文本不受影响。
 
-网页设置默认勾选“保留历史思考”，请求显式发送 `preserve_thinking=true`。关闭后会移除非空历史reasoning，可能从较早的assistant回答前重新Prefill。外部平台要复用含实际思考的历史，需回传 `reasoning_content` 和 `preserve_thinking=true`，或以 `--preserve-thinking` 启动服务；通用服务默认仍是false。单独的空 canonical `<think>` prologue 已有保留修复。
+网页设置默认勾选“保留历史思考”，请求显式发送 `preserve_thinking=true`。Windows 启动器默认启用该策略，显式请求 `preserve_thinking=false` 可覆盖；直接运行通用 `ninfer-serve` 时默认仍为 false。关闭后会从后续请求渲染的历史中移除非空 assistant reasoning，可能从较早的历史重新 Prefill。外部 Agent 每轮都必须回传完整实际 `reasoning_content`；服务端无法恢复客户端已省略或删除的推理文本。使用关闭策略累积的旧会话切换为开启后，首轮可能需要重算受影响的历史并保存新稳定检查点，之后只有在历史精确匹配时才能复用。单独的空 canonical `<think>` prologue 已有保留修复。
 
 停止或断线时，服务端可能已经提交了客户端尚未收到的输出；客户端回传的半截回答与该 endpoint 不同。缓存仍须精确匹配实际历史，不能把超前状态直接当作半截回答的状态；此时可能退回较早的 response-replay/shared checkpoint，再计算回答尾部。磁盘保存与恢复不保证任意截断位置全量命中。
 

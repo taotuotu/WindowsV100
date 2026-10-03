@@ -26,6 +26,9 @@ struct RequestLogContext {
     std::optional<std::uint32_t> thinking_budget;
     std::optional<RequestedReasoningEffort> requested_reasoning_effort;
     std::optional<ninfer::ReasoningEffort> resolved_reasoning_effort;
+    std::optional<bool> requested_preserve_thinking;
+    std::size_t reasoning_history_messages = 0;
+    std::size_t reasoning_history_bytes   = 0;
     bool preserve_thinking                 = false;
     bool preserve_thinking_semantic_change = false;
     ninfer::ResolvedSamplingParameters sampling;
@@ -55,6 +58,9 @@ struct RequestRejectionLogContext {
     ToolChoice tool_choice;
     bool has_tool_history = false;
     std::optional<RequestedReasoningEffort> requested_reasoning_effort;
+    std::optional<bool> requested_preserve_thinking;
+    std::size_t reasoning_history_messages = 0;
+    std::size_t reasoning_history_bytes   = 0;
     ApiError error;
 };
 

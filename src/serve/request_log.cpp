@@ -130,6 +130,10 @@ Json requested_reasoning_effort_json(const std::optional<RequestedReasoningEffor
                      : Json(nullptr);
 }
 
+Json optional_bool_json(const std::optional<bool>& value) {
+    return value ? Json(*value) : Json(nullptr);
+}
+
 Json resolved_reasoning_effort_json(bool enable_thinking,
                                     const std::optional<ninfer::ReasoningEffort>& resolved) {
     if (!enable_thinking) { return "none"; }
@@ -245,6 +249,10 @@ Json request_json(const RequestLogContext& context) {
                 {"resolved_reasoning_effort",
                  resolved_reasoning_effort_json(context.enable_thinking,
                                                 context.resolved_reasoning_effort)},
+                {"requested_preserve_thinking",
+                 optional_bool_json(context.requested_preserve_thinking)},
+                {"reasoning_history_messages", context.reasoning_history_messages},
+                {"reasoning_history_bytes", context.reasoning_history_bytes},
                 {"preserve_thinking", context.preserve_thinking},
                 {"preserve_thinking_semantic_change", context.preserve_thinking_semantic_change},
                 {"sampling", sampler_json(context.sampling)}};
@@ -284,6 +292,10 @@ Json rejected_request_json(const RequestRejectionLogContext& context) {
                 {"has_tool_history", context.has_tool_history},
                 {"requested_reasoning_effort",
                  requested_reasoning_effort_json(context.requested_reasoning_effort)},
+                {"requested_preserve_thinking",
+                 optional_bool_json(context.requested_preserve_thinking)},
+                {"reasoning_history_messages", context.reasoning_history_messages},
+                {"reasoning_history_bytes", context.reasoning_history_bytes},
                 {"resolved_reasoning_effort", nullptr}};
 }
 

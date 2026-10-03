@@ -170,7 +170,7 @@ std::vector<std::string> effective_arguments(const std::vector<std::string>& arg
         "--max-context", "143600", "--max-concurrency", "1",
         "--prefill-chunk", "2048", "--kv-dtype", "bf16", "--spec", "mtp",
         "--draft-tokens", "6", "--lm-head-draft", "--temperature", "0.7",
-        "--seed", "123",
+        "--seed", "123", "--preserve-thinking",
     };
     effective.insert(effective.end(), defaults.begin(), defaults.end());
     effective.insert(effective.end(), argv.begin() + static_cast<std::ptrdiff_t>(first_user_option),

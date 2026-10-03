@@ -3,6 +3,24 @@
 #include <utility>
 
 namespace ninfer::serve {
+namespace {
+
+struct ReasoningHistoryCounts {
+    std::size_t messages = 0;
+    std::size_t bytes    = 0;
+};
+
+ReasoningHistoryCounts count_reasoning_history(const GenerationRequest& request) noexcept {
+    ReasoningHistoryCounts counts;
+    for (const ChatTurn& message : request.messages) {
+        if (message.role != ChatRole::Assistant || message.reasoning_content.empty()) { continue; }
+        ++counts.messages;
+        counts.bytes += message.reasoning_content.size();
+    }
+    return counts;
+}
+
+} // namespace
 
 RequestLogContext make_request_log_context(std::uint64_t id, std::string protocol,
                                            const GenerationRequest& request,
@@ -24,6 +42,10 @@ RequestLogContext make_request_log_context(std::uint64_t id, std::string protoco
     context.thinking_budget                    = prepared.thinking_budget;
     context.requested_reasoning_effort         = request.reasoning_effort;
     context.resolved_reasoning_effort          = prepared.effective_reasoning_effort;
+    context.requested_preserve_thinking        = request.preserve_thinking;
+    const ReasoningHistoryCounts reasoning_history = count_reasoning_history(request);
+    context.reasoning_history_messages             = reasoning_history.messages;
+    context.reasoning_history_bytes                = reasoning_history.bytes;
     context.preserve_thinking                  = prepared.preserve_thinking;
     context.preserve_thinking_semantic_change  = metadata.preserve_thinking_semantic_change;
     context.sampling                           = prepared.sampling;
@@ -50,6 +72,10 @@ RequestRejectionLogContext make_request_rejection_log_context(std::uint64_t id,
     context.tool_choice                        = request.tool_choice;
     context.has_tool_history                   = request.has_tool_history();
     context.requested_reasoning_effort         = request.reasoning_effort;
+    context.requested_preserve_thinking        = request.preserve_thinking;
+    const ReasoningHistoryCounts reasoning_history = count_reasoning_history(request);
+    context.reasoning_history_messages             = reasoning_history.messages;
+    context.reasoning_history_bytes                = reasoning_history.bytes;
     context.error                              = std::move(error);
     return context;
 }
