@@ -437,6 +437,9 @@ void include_required_frontiers(SnapshotRequiredFrontiers& required,
 void write_private_owner_record(ProgramImplCore& program, ContextCacheExportState& session,
                                 const SequenceState& sequence,
                                 ninfer::ContextCacheWriter& writer) {
+    // Pressure may drop the endpoint and trim KV to a surviving rewrite/anchor checkpoint.
+    // The historical execution/ledger frontier remains intact; only a live endpoint requires
+    // the full executed KV range. The checkpoint-protection checks below cover retained states.
     if (sequence.endpoint_valid && sequence.execution_frontier == 0) {
         throw ninfer::ContextCacheOwnershipError(
             "private endpoint has an empty execution frontier");
@@ -463,7 +466,9 @@ void write_private_owner_record(ProgramImplCore& program, ContextCacheExportStat
         sequence.execution_frontier > sequence.ledger_frontier ||
         sequence.ledger_frontier - sequence.execution_frontier > 1U ||
         sequence.text_kv_valid != program.text_kv_addresses->committed_frontier(sequence.kv->text) ||
-        sequence.text_kv_valid != sequence.execution_frontier ||
+        sequence.text_kv_valid > sequence.execution_frontier ||
+        (sequence.endpoint_valid && sequence.text_kv_valid != sequence.execution_frontier) ||
+        sequence.mtp_kv_valid > sequence.execution_frontier ||
         (sequence.endpoint_valid && !sequence.tail_hidden_valid) ||
         sequence.rebuild_tail_begin > sequence.execution_frontier ||
         sequence.rebuild_work.tokens != sequence.execution_frontier ||
@@ -1062,7 +1067,8 @@ void ensure_import_page_reservation(ProgramImplCore& program, ContextCacheImport
         sequence.execution_frontier > program.capacity ||
         sequence.execution_frontier > sequence.ledger_frontier ||
         sequence.ledger_frontier - sequence.execution_frontier > 1U ||
-        sequence.text_kv_valid != sequence.execution_frontier ||
+        sequence.text_kv_valid > sequence.execution_frontier ||
+        (sequence.endpoint_valid && sequence.text_kv_valid != sequence.execution_frontier) ||
         sequence.dflash_context_frontier != 0 ||
         sequence.rebuild_tail_begin > sequence.execution_frontier ||
         sequence.rebuild_work.tokens != sequence.execution_frontier ||
@@ -1148,7 +1154,9 @@ void ensure_import_page_reservation(ProgramImplCore& program, ContextCacheImport
     }
     if (has_backend) { imported.backend_address = read_kv_address(program, session, reader, true); }
     if (imported.main_address.frontier != sequence.text_kv_valid ||
-        imported.main_address.frontier != sequence.execution_frontier ||
+        imported.main_address.frontier > sequence.execution_frontier ||
+        (sequence.endpoint_valid &&
+         imported.main_address.frontier != sequence.execution_frontier) ||
         (imported.backend_address.has_value() != expect_backend) ||
         (imported.backend_address &&
          imported.backend_address->frontier != sequence.mtp_kv_valid) ||

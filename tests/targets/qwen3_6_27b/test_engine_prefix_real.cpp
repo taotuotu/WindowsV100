@@ -1,16 +1,51 @@
 #include "ninfer/engine.h"
 
+#include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
 #include <limits>
 #include <optional>
+#include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
 namespace {
+
+class MemoryContextCacheWriter final : public ninfer::ContextCacheWriter {
+public:
+    void write(std::span<const std::byte> bytes) override {
+        archive.insert(archive.end(), bytes.begin(), bytes.end());
+    }
+
+    std::vector<std::byte> archive;
+};
+
+class MemoryContextCacheReader final : public ninfer::ContextCacheReader {
+public:
+    explicit MemoryContextCacheReader(std::span<const std::byte> archive) : archive_(archive) {}
+
+    void read_exact(std::span<std::byte> bytes) override {
+        if (bytes.empty()) { return; }
+        if (bytes.size() > archive_.size() - offset_) {
+            throw std::runtime_error("context-cache test reader reached end of archive");
+        }
+        std::copy_n(archive_.data() + offset_, bytes.size(), bytes.data());
+        offset_ += bytes.size();
+    }
+
+    [[nodiscard]] std::uint64_t remaining_bytes() const override {
+        return static_cast<std::uint64_t>(archive_.size() - offset_);
+    }
+
+private:
+    std::span<const std::byte> archive_;
+    std::size_t offset_ = 0;
+};
 
 ninfer::EngineOptions engine_options(const char* artifact) {
     ninfer::EngineOptions options;
@@ -1524,6 +1559,57 @@ int exercise_private_checkpoint_pressure_retention(const char* artifact) {
         return 1;
     }
 
+    ninfer::ContextCacheSnapshot snapshot;
+    try {
+        snapshot = engine.capture_context_cache();
+    } catch (const std::exception& error) {
+        std::cerr << "private-checkpoint pressure snapshot capture failed: " << error.what()
+                  << " available=" << engine.is_available() << '\n';
+        return 1;
+    }
+    const ninfer::ContextCacheSnapshotStats& captured = snapshot.stats();
+    if (!snapshot || captured.checkpoints == 0 || captured.session_continuations == 0 ||
+        !engine.is_available()) {
+        std::cerr << "private-checkpoint pressure snapshot capture omitted the retained session: "
+                  << "checkpoints=" << captured.checkpoints
+                  << " session_continuations=" << captured.session_continuations
+                  << " available=" << engine.is_available() << '\n';
+        return 1;
+    }
+
+    engine.clear_context_cache();
+    if (!engine.is_available()) {
+        std::cerr << "private-checkpoint pressure cache clear made the Engine unavailable\n";
+        return 1;
+    }
+    MemoryContextCacheWriter archive;
+    snapshot.write_to(archive);
+    if (archive.archive.size() != captured.bytes) {
+        std::cerr << "private-checkpoint pressure snapshot writer changed the archive size: "
+                  << "captured=" << captured.bytes << " written=" << archive.archive.size()
+                  << '\n';
+        return 1;
+    }
+
+    MemoryContextCacheReader reader(std::span<const std::byte>(archive.archive));
+    const ninfer::ContextCacheSnapshotStats restored = engine.load_context_cache(reader);
+    if (reader.remaining_bytes() != 0 || restored.bytes != captured.bytes ||
+        restored.private_continuations != captured.private_continuations ||
+        restored.shared_prefixes != captured.shared_prefixes ||
+        restored.checkpoints != captured.checkpoints ||
+        restored.session_continuations != captured.session_continuations ||
+        !engine.is_available()) {
+        std::cerr << "private-checkpoint pressure snapshot round-trip was incomplete: "
+                  << "remaining=" << reader.remaining_bytes() << " bytes=" << captured.bytes
+                  << '/' << restored.bytes << " private=" << captured.private_continuations
+                  << '/' << restored.private_continuations << " shared=" << captured.shared_prefixes
+                  << '/' << restored.shared_prefixes << " checkpoints=" << captured.checkpoints
+                  << '/' << restored.checkpoints << " sessions=" << captured.session_continuations
+                  << '/' << restored.session_continuations
+                  << " available=" << engine.is_available() << '\n';
+        return 1;
+    }
+
     ninfer::PromptInput resume =
         pressure_turn(*long_text, session, ninfer::CacheRetentionHint::LiveSession);
     ninfer::ChatMessage assistant;
@@ -1551,6 +1637,15 @@ int exercise_private_checkpoint_pressure_retention(const char* artifact) {
                   << " future_ns=" << resumed.materialization.predicted_future_loss_ns << '\n';
         return 1;
     }
+    std::cout << "private-checkpoint snapshot round-trip: drops="
+              << after_pressure.pressure_checkpoints_dropped -
+                     before_pressure.pressure_checkpoints_dropped
+              << " degraded=" << after_pressure.pressure_private_owners_degraded -
+                                     before_pressure.pressure_private_owners_degraded
+              << " bytes=" << restored.bytes << " checkpoints=" << restored.checkpoints
+              << " sessions=" << restored.session_continuations
+              << " reused=" << resumed.reused_prompt_tokens
+              << " available=" << engine.is_available() << '\n';
     return 0;
 }
 

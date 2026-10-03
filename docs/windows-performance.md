@@ -205,6 +205,28 @@ Core原始字节传输与长度拒绝检查通过。归档格式与本次之前�
 强杀或断电仍可能只恢复上一代完整提交。两份长上下文归档可能增加系统内存峰值，
 具体预算与操作说明见 [Windows缓存说明](windows-v100.md)。
 
+### 压力退化快照回归修复（2026-10-03）
+
+随后实际带图Agent请求发生缓存导出错误，之后服务返回503。匿名指标记录了旧private
+owner退化与checkpoint drop：压力策略可以删除末端checkpoint、只保留较早的rewrite/anchor，
+此时物理KV短于历史execution frontier。旧归档校验无条件要求两者相等，把合法状态判成
+致命所有权错误。本次统一导出、读取和导入提交规则：只有末端checkpoint仍存在时才要求
+完整KV相等；其余情况允许较短KV，并继续严格检查它覆盖全部保留checkpoint。
+归档布局、数学版本与session binding不变，没有通过关闭缓存或吞掉所有权错误恢复服务。
+
+真实Engine的 `private-checkpoint-pressure` 场景强制触发一次checkpoint drop与一次private
+owner退化、保留其turn closure。固定上述V100/v2 artifact，FP8 KV、普通解码、context8192、
+KV容量16384、并发2、无Host缓存；它用于复现资源状态，不代表生产服务采用该配置。
+旧 `2ae09e81` 库稳定复现原错误并使Engine不可用；修复后捕获、清空测试Engine目录、
+写入不可变RAM归档、导入完整归档及续接均通过：911870952字节、4个checkpoint、1个session
+binding，下一轮命中7676 token并保持可用。测试不访问生产会话目录；单跑方式见
+[测试指南](../tests/README.md)。
+
+另以当前生产配置（246000 / INT8 / MTP3 / prefill2048 / Vision开启）在独立8111与测试磁盘目录
+检查一张4800-patch合成PNG及两个完整历史续接。三轮均正常结束，后两轮1267/1286输入
+分别命中1249/1268；Engine持续可用，磁盘失败数0。三份捕获合并为两次磁盘提交和一次
+待写快照合并，队列最终排空；没有把这些测试会话写入生产目录。
+
 ## 接下来值得优化的地方
 
 ### 冷输入的预填充

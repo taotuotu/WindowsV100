@@ -121,6 +121,12 @@ Engine 还提供 idle-only 的流式 `save_context_cache(ContextCacheWriter&)` �
 record校验或导入失败都会撤销未发布的导入，owner回滚失败则标记Engine不可用并传播所有权错误。
 调用者可用idle-only clear预先清空inactive目录，但不能绕过Engine直接操作CUDA指针或Program文件格式。
 
+Private owner 因压力丢弃 endpoint 后，仍可保留 rewrite/long-anchor checkpoint。其历史 execution/
+ledger frontier 不变，物理 KV 可缩到剩余 checkpoint 的最大需求；归档必须保留这两个不同的前沿。
+只有 endpoint 仍有效时要求 Main KV 覆盖完整 execution frontier；无 endpoint 时允许较短的稳定 KV，
+但其 checkpoint protection 仍必须覆盖全部存留 checkpoint。导出、导入和原子导入提交使用相同规则，
+不能把这种合法退化状态当作所有权损坏或丢掉其 session binding。
+
 需要与磁盘写入并行时，Generation Engine 可调用 idle-only 的
 `capture_context_cache(maximum_bytes)`。Engine worker 仍是唯一 Program/CUDA 访问者，但将完整 opaque
 archive 捕获到每块 16 MiB 的 host-owned immutable chunks；默认 archive 上限为 16 GiB。成功返回后，

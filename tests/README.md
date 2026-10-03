@@ -127,6 +127,16 @@ NINFER_QWEN3_6_27B_WEIGHTS=$PWD/out/qwen3_6_27b.ninfer \
   ctest --test-dir build -R ninfer_qwen3_6_27b_prefix_real_test --output-on-failure
 ```
 
+Its focused `private-checkpoint-pressure` scenario uses a Qwen3.8-27B NVFP4 artifact. It verifies
+that a pressure-degraded private continuation can be captured, written to an in-memory archive after
+clearing the Engine catalog, restored from that archive, and reused at the retained turn closure:
+
+```bash
+NINFER_QWEN3_8_27B_NVFP4_WEIGHTS=$PWD/out/qwen3_8_27b_nvfp4.ninfer \
+NINFER_PREFIX_REAL_SCENARIO=private-checkpoint-pressure \
+  ctest --test-dir build -R ninfer_qwen3_6_27b_prefix_real_test --output-on-failure
+```
+
 The causal-scoring integration test uses the same artifact variable and checks a full 1,024-column
 score tile, overlapping target suffixes, and repeated-window State/KV isolation:
 

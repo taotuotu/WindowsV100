@@ -117,7 +117,9 @@ ProgramImplCore::commit_context_cache_import(std::shared_ptr<void>& opaque) {
                 const bool expects_backend = speculative_backend == SpeculativeBackend::Mtp;
                 if (expects_backend != owner->backend_address.has_value() ||
                     owner->sequence.text_kv_valid != owner->main_address.frontier ||
-                    owner->sequence.execution_frontier != owner->main_address.frontier ||
+                    owner->main_address.frontier > owner->sequence.execution_frontier ||
+                    (owner->sequence.endpoint_valid &&
+                     owner->sequence.execution_frontier != owner->main_address.frontier) ||
                     (expects_backend &&
                      owner->sequence.mtp_kv_valid != owner->backend_address->frontier) ||
                     (!expects_backend && owner->sequence.mtp_kv_valid != 0)) {
