@@ -448,7 +448,7 @@
             <div class="settings-row">
               <label class="field">
                 <span class="field-label">Temperature</span>
-                <input id="temperature" type="number" min="0" max="2" step="0.1" value="0" inputmode="decimal">
+                <input id="temperature" type="number" min="0" max="2" step="0.1" value="0.8" inputmode="decimal">
               </label>
               <label class="field">
                 <span class="field-label">最大输出 tokens</span>
@@ -2036,7 +2036,7 @@
         // Snapshot settings and credentials for this request; edits apply to the next turn.
         const requestSettings = {
           model: ui.model.value || DEFAULT_MODEL,
-          temperature: boundedNumber(ui.temperature, 0, 0, 2),
+          temperature: boundedNumber(ui.temperature, 0.8, 0, 2),
           maxTokens: Math.round(boundedNumber(ui.maxTokens, 4096, 1, 32768)),
           thinking: ui.thinking.checked,
           preserveThinking: ui.preserveThinking.checked,

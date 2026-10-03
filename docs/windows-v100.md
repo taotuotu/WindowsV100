@@ -75,7 +75,7 @@ MTP6 / prefill2048 / 143600；其它电脑需按实际空闲显存选择容量�
 | 前缀缓存 | 开启；当前会话独占；额外 Device State 1、Host State 8、Host KV 0 |
 | 磁盘会话缓存 | 默认开启；`.local/context-cache`；磁盘预算32GiB、最多8个会话；Host 捕获峰值另限32GiB |
 | 活动请求 | 生成/捕获期间1；第二个请求返回429/`inference_busy`；背景磁盘写入期间可发下一轮 |
-| 思考与采样 | 默认启用模型原生思考，未指定挡位时采用模板默认 `xhigh`；temperature 0、seed 123；请求可覆盖 |
+| 思考与采样 | 默认启用模型原生思考，未指定挡位时采用模板默认 `xhigh`；temperature 0.8、seed 123；请求可覆盖 |
 
 网页默认勾选“启用思考模式”，不额外指定 `reasoning_effort` 或思考 token 预算，沿用模型模板的原生默认。外部 Agent 未传思考设置时也默认启用；显式传入 `reasoning_effort: "none"` 或 `enable_thinking: false` 可关闭。原生启动参数 `--no-thinking` 可关闭服务默认思考。思考与正文仍共用请求的输出 token 上限。
 

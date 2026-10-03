@@ -149,7 +149,7 @@ std::string serve_usage_text(const char* argv0) {
            "host 127.0.0.1, port 8110, alias qwen3.8-27b, CUDA device auto (SM70, >=30 GiB), "
            "context/KV 143600, "
            "concurrency 1, prefill chunk 2048, bf16 KV, MTP draft width 6 with optimized head, "
-           "thinking off, prefix reuse on, temperature 0, seed 123. Request sampling fields "
+           "native thinking on, prefix reuse on, temperature 0.8, seed 123. Request sampling fields "
            "may override process defaults.\n"
            "       --device auto selects the first CUDA SM70 device with at least 30 GiB total memory; "
            "pass --device N to select a device explicitly.\n"
