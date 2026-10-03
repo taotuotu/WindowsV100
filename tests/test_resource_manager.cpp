@@ -2214,6 +2214,9 @@ void test_candidate_search_prefers_deep_reuse_without_eviction() {
 
     require(result && result->plan && result->candidate == PlanningCandidateId{.value = 1},
             "shallow Root pressure path starved the cheaper reuse candidate");
+    require(result->diagnostics.reuse_candidates == 1 &&
+                result->diagnostics.max_candidate_reuse_tokens == 55'048,
+            "pressure-plan reuse candidate diagnostics did not reflect admission summaries");
     require(result->plan->private_actions.size() == 2 &&
                 std::none_of(
                     result->plan->private_actions.begin(), result->plan->private_actions.end(),
@@ -2290,6 +2293,7 @@ void test_dominating_identity_does_not_build_pressure_graph() {
 
     FakeProgram program;
     FakeAdmissionCandidate candidate;
+    candidate.value.reusable_prompt_tokens = 16;
     set_fake_machine_costs(candidate.identity.machine_work, 100'000'000, 100'000'000);
     candidate.identity.physical_status   = ninfer::runtime::MaterializationPhysicalStatus::Feasible;
     candidate.identity.source_mode       = PrivateSourceMode::ConsumeToActive;
@@ -2317,6 +2321,8 @@ void test_dominating_identity_does_not_build_pressure_graph() {
                                pressure_inputs, logical_goal, Planner::Clock::now());
     require(result &&
                 result->diagnostics.stop_reason == ninfer::MaterializationStopReason::NoPressure &&
+                result->diagnostics.reuse_candidates == 1 &&
+                result->diagnostics.max_candidate_reuse_tokens == 16 &&
                 !pressure_inputs_built && program.pressure_planning_sessions == 0,
             "dominating identity eagerly constructed the pressure graph");
 }

@@ -914,7 +914,7 @@ in append mode and flushes every event, so successive model or MTP blocks may sh
 file. The parent directory must already exist. Failure to open the file aborts startup; the log path
 is also rejected if it resolves to the model artifact.
 
-Every line is one `ninfer_serve_request_log` schema-v20 JSON object. All events carry
+Every line is one `ninfer_serve_request_log` schema-v21 JSON object. All events carry
 `timestamp_unix_ms` and a process-unique `server_instance_id`; request IDs are monotonic only within
 that server instance. Successful request-start records include request-scoped acquisition,
 media-preprocessing wall/work, tokenizer, cache hit/miss/single-flight, and payload-size fields;
@@ -941,8 +941,11 @@ preserved for consumer validation, and a stable text-fallback reason. Fallback r
 `trailing_content`. These counters contain no tool arguments or generated text.
 
 `request_done.materialization` is the immutable decision committed for that request. It reports predicted immediate,
-future-loss and total nanoseconds; evaluated targets and projection work; planning/search nanoseconds; stop reason;
-the budget-exhausted flag; selected degradation units; and whether the selected target was the maximal root fallback.
+future-loss and total nanoseconds; `reuse_candidates` counts planner admission candidates whose summary has a nonzero
+reusable prompt prefix, and `max_candidate_reuse_tokens` is the largest such prefix (zero when there are none);
+evaluated targets and projection work; planning/search nanoseconds; stop reason; the budget-exhausted flag; selected
+degradation units; and whether the selected target was the maximal root fallback. These candidate counts describe the
+set considered by this planner call, not every checkpoint in the Engine catalog or their eventual feasibility.
 Stop reasons are `no_pressure`, `queue_exhausted`, `target_budget`, `expansion_capacity`, `time_budget`, and
 `value_of_next_expansion`. Search is bounded and heuristic; these diagnostics do not claim model or global optimality.
 Aborted planning attempts are not published.

@@ -330,6 +330,8 @@ Json materialization_json(const ninfer::MaterializationDiagnostics& diagnostics)
         {"predicted_now_ns", diagnostics.predicted_now_ns},
         {"predicted_future_loss_ns", diagnostics.predicted_future_loss_ns},
         {"predicted_total_ns", diagnostics.predicted_total_ns},
+        {"reuse_candidates", diagnostics.reuse_candidates},
+        {"max_candidate_reuse_tokens", diagnostics.max_candidate_reuse_tokens},
         {"targets_evaluated", diagnostics.targets_evaluated},
         {"projection_work", diagnostics.projection_work},
         {"planning_elapsed_ns", diagnostics.planning_elapsed_ns},

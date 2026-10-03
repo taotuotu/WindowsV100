@@ -127,8 +127,17 @@ public:
         std::vector<IdentityRoot> roots;
         roots.reserve(candidates.size());
         std::uint64_t projection_work = 0;
+        std::uint32_t reuse_candidates           = 0;
+        std::uint32_t max_candidate_reuse_tokens = 0;
         for (std::size_t index = 0; index < candidates.size(); ++index) {
             const CandidateInput& input = candidates[index];
+            const std::uint32_t reusable_prompt_tokens =
+                input.candidate->summary().reusable_prompt_tokens;
+            if (reusable_prompt_tokens > 0) {
+                ++reuse_candidates;
+                max_candidate_reuse_tokens =
+                    std::max(max_candidate_reuse_tokens, reusable_prompt_tokens);
+            }
             const IdentityMaterializationAssessment& identity =
                 input.candidate->identity_assessment();
             planning_saturating_add(projection_work, identity.projection_work);
@@ -188,6 +197,8 @@ public:
                     identity_best->cost, static_cast<std::uint32_t>(candidates.size()),
                     projection_work, planning_started, MaterializationStopReason::NoPressure,
                     false);
+                diagnostics.reuse_candidates = reuse_candidates;
+                diagnostics.max_candidate_reuse_tokens = max_candidate_reuse_tokens;
                 Result result;
                 result.plan             = std::move(*sealed);
                 result.candidate        = candidates[identity_best->candidate_index].id;
@@ -597,6 +608,8 @@ public:
         MaterializationDiagnostics diagnostics = make_diagnostics(
             incumbent.cost, targets_evaluated, projection_work, planning_started, search_elapsed_ns,
             stop_reason, budget_exhausted, incumbent.degradation_units, incumbent.root_maximal);
+        diagnostics.reuse_candidates = reuse_candidates;
+        diagnostics.max_candidate_reuse_tokens = max_candidate_reuse_tokens;
 
         Result result;
         result.plan                = std::move(*sealed);

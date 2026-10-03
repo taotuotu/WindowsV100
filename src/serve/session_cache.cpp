@@ -82,7 +82,7 @@ class StoreError final : public std::runtime_error {
 public:
     enum class Kind : std::uint8_t { Io, Budget };
 
-    StoreError(Kind kind, const char* message) : std::runtime_error(message), kind_(kind) {}
+    StoreError(Kind kind, const std::string& message) : std::runtime_error(message), kind_(kind) {}
     [[nodiscard]] Kind kind() const noexcept { return kind_; }
 
 private:
@@ -348,7 +348,13 @@ void require_json_members(const Json& value, std::initializer_list<std::string_v
                                   DWORD disposition, DWORD flags = FILE_ATTRIBUTE_NORMAL) {
     const std::wstring native = extended_windows_path(path);
     HANDLE handle = ::CreateFileW(native.c_str(), access, share, nullptr, disposition, flags, nullptr);
-    if (handle == INVALID_HANDLE_VALUE) { throw StoreError(StoreError::Kind::Io, "session cache file open failed"); }
+    if (handle == INVALID_HANDLE_VALUE) {
+        const DWORD error = ::GetLastError();
+        throw StoreError(StoreError::Kind::Io,
+                         "session cache file open failed (win32=" + std::to_string(error) +
+                             ", access=" + std::to_string(access) +
+                             ", disposition=" + std::to_string(disposition) + ")");
+    }
     return FileHandle(handle);
 }
 
@@ -1526,14 +1532,23 @@ private:
 
     [[nodiscard]] std::uint64_t named_file_size(std::string_view name) const {
         const std::filesystem::path path = child_path(name);
-        const DWORD attributes = ::GetFileAttributesW(extended_windows_path(path).c_str());
-        if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0 ||
-            (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+        WIN32_FILE_ATTRIBUTE_DATA attributes{};
+        if (!::GetFileAttributesExW(extended_windows_path(path).c_str(), GetFileExInfoStandard,
+                                   &attributes)) {
+            const DWORD error = ::GetLastError();
+            if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) { return 0; }
+            throw StoreError(StoreError::Kind::Io,
+                             "session cache file size query failed (win32=" +
+                                 std::to_string(error) + ")");
+        }
+        if ((attributes.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 ||
+            (attributes.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
             return 0;
         }
-        FileHandle file = open_file(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE,
-                                    OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN);
-        return file_size(file.get());
+        // Quota accounting also visits the currently open snapshot writer. Query metadata
+        // without reopening its payload, which would otherwise conflict with GENERIC_WRITE.
+        return (static_cast<std::uint64_t>(attributes.nFileSizeHigh) << 32U) |
+               attributes.nFileSizeLow;
     }
 
     [[nodiscard]] std::uint64_t calculate_disk_bytes() const {

@@ -399,6 +399,8 @@ int main() {
                           .predicted_now_ns           = 200000,
                           .predicted_future_loss_ns   = 50000,
                           .predicted_total_ns         = 250000,
+                          .reuse_candidates           = 2,
+                          .max_candidate_reuse_tokens = 55'048,
                           .targets_evaluated          = 7,
                           .projection_work            = 31,
                           .planning_elapsed_ns        = 9000,
@@ -454,6 +456,8 @@ int main() {
         check(done.at("speculative").at("accepted_per_position") == Json::array({290, 240, 190}),
               "speculative position counts missing");
     failures += check(done.at("materialization").at("predicted_total_ns") == 250000 &&
+                          done.at("materialization").at("reuse_candidates") == 2 &&
+                          done.at("materialization").at("max_candidate_reuse_tokens") == 55'048 &&
                           done.at("materialization").at("targets_evaluated") == 7 &&
                           done.at("materialization").at("stop_reason") == "queue_exhausted" &&
                           !done.at("materialization").contains("model_optimal") &&

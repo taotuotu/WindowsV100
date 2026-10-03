@@ -17,15 +17,15 @@ from tools.bench.run_serve_corpus import (
 )
 
 
-def test_request_log_v20_identity_is_accepted() -> None:
+def test_request_log_v21_identity_is_accepted() -> None:
     current = {
         "artifact_type": "ninfer_serve_request_log",
-        "schema_version": 20,
+        "schema_version": 21,
         "event": "server_start",
     }
     require_server_log_identity(current, "server_start")
 
-    stale = dict(current, schema_version=19)
+    stale = dict(current, schema_version=20)
     with pytest.raises(CampaignError):
         require_server_log_identity(stale, "server_start")
 
@@ -53,7 +53,7 @@ def test_result_record_parses_request_host_exposure() -> None:
     response = {"usage": {"prompt_tokens": 10, "completion_tokens": 5}}
     event = {
         "artifact_type": "ninfer_serve_request_log",
-        "schema_version": 20,
+        "schema_version": 21,
         "event": "request_done",
         "request": {
             "model": spec.model_id,

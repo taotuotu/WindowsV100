@@ -227,6 +227,16 @@ binding，下一轮命中7676 token并保持可用。测试不访问生产会话
 分别命中1249/1268；Engine持续可用，磁盘失败数0。三份捕获合并为两次磁盘提交和一次
 待写快照合并，队列最终排空；没有把这些测试会话写入生产目录。
 
+### 配额淘汰时的活动快照元数据读取（2026-10-03）
+
+Windows 配额压力测试定位到一项文件共享冲突：写入新快照时，配额检查会淘汰最旧会话并重新统计目录；旧实现用 `CreateFileW` 重新打开仍在写入的临时文件查询大小，读句柄未共享写权限，导致 `session cache file open failed`。现在改用 `GetFileAttributesExW` 读取 64 位大小元数据，无需重开快照文件。
+
+私有 1024 MiB 缓存测试使用 Context 8192、INT8 KV、MTP3、prefill2048 和三个独立短会话。旧构建 A/B 保存成功，C 触发淘汰并失败；修复构建 A/B/C 均保存成功，最终 saves=3、failures=0、sessions=2、disk bytes=932957110。该结果验证的是此类配额淘汰下的保存路径。
+
+req209 后观察到的一次实际约 114K 输入的整段重算，仍未由这项 I/O 修复验证为已解决。新匿名请求记录 schema 21 增加 `reuse_candidates` 与 `max_candidate_reuse_tokens`，可辅助区分没有候选与 planner 未选择候选；计数不保证候选在物理上可行，字段定义见 [serving 文档](serving.md) 中的 `request_done.materialization`。
+
+另一次私有短取消诊断在 2000 个 `hello` 历史中断开后，下一轮成功续接并复用 2046 token、重算 34 token（TTFT 0.475 秒）。这表明该短续接有效，但不能据此认定 114K 输入重算已修复。
+
 ## 接下来值得优化的地方
 
 ### 冷输入的预填充

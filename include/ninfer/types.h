@@ -735,6 +735,8 @@ struct MaterializationDiagnostics {
     std::uint64_t predicted_now_ns           = 0;
     std::uint64_t predicted_future_loss_ns   = 0;
     std::uint64_t predicted_total_ns         = 0;
+    std::uint32_t reuse_candidates           = 0;
+    std::uint32_t max_candidate_reuse_tokens = 0;
     std::uint32_t targets_evaluated          = 0;
     std::uint64_t projection_work            = 0;
     std::uint64_t planning_elapsed_ns        = 0;
